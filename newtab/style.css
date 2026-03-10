@@ -1,0 +1,419 @@
+/* ===========================
+   New Tab — 全局样式
+   =========================== */
+
+*,
+*::before,
+*::after {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html,
+body {
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  font-family: 'Inter', system-ui, -apple-system, sans-serif;
+}
+
+/* ----- 背景壁纸层 ----- */
+#bg-wrapper {
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+}
+
+#bg-image {
+  position: absolute;
+  inset: 0;
+  background-color: transparent;
+  background-size: cover;
+  background-position: center;
+  background-repeat: no-repeat;
+  transition: opacity 0.8s ease-in-out;
+  opacity: 0;
+}
+
+#bg-image.loaded {
+  opacity: 1;
+}
+
+/* 背景蒙版（为了让文字看清，可以调整透明度） */
+#bg-overlay {
+  position: absolute;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.2);
+  pointer-events: none;
+  z-index: 10;
+}
+
+/* ----- 版权信息层 ----- */
+#bg-credit {
+  position: fixed;
+  bottom: 6px;
+  left: 24px;
+  z-index: 1;
+}
+
+#bg-copyright {
+  color: rgba(255, 255, 255, 0.7);
+  font-size: 12px;
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.6);
+  cursor: pointer;
+  transition: color 0.2s;
+}
+
+#bg-copyright:hover {
+  color: rgba(255, 255, 255, 0.95);
+  text-decoration: underline;
+}
+
+/* ----- 故事卡片层 ----- */
+.story-card {
+  position: fixed;
+  bottom: 0;
+  left: 0;
+  width: 100%;
+  max-height: 50vh;
+  background: rgba(0, 0, 0, 0.6);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border-top: 1px solid rgba(255, 255, 255, 0.15);
+  padding: 24px 40px;
+  color: rgba(255, 255, 255, 0.9);
+  opacity: 0;
+  transform: translateY(100%);
+  pointer-events: none;
+  transition: all 0.4s cubic-bezier(0.2, 0.8, 0.2, 1);
+  overflow-y: auto;
+  box-sizing: border-box;
+  z-index: 2000;
+  box-shadow: 0 -4px 30px rgba(0, 0, 0, 0.5);
+}
+
+.story-card.open {
+  opacity: 1;
+  transform: translateY(0);
+  pointer-events: auto;
+}
+
+.story-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  margin-bottom: 16px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.2);
+  padding-bottom: 12px;
+}
+
+.story-title {
+  font-size: 18px;
+  font-weight: 500;
+  line-height: 1.4;
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
+}
+
+.story-close {
+  background: none;
+  border: none;
+  color: rgba(255, 255, 255, 0.6);
+  font-size: 28px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 4px;
+  margin-top: -8px;
+  transition: color 0.2s;
+  flex-shrink: 0;
+  margin-left: 16px;
+}
+
+.story-close:hover {
+  color: white;
+}
+
+.story-body {
+  font-size: 14.5px;
+  line-height: 1.8;
+  color: rgba(255, 255, 255, 0.85);
+}
+
+.story-body p {
+  margin-bottom: 12px;
+}
+
+.story-body a {
+  color: #8ab4f8;
+  text-decoration: none;
+}
+
+.story-body a:hover {
+  text-decoration: underline;
+}
+
+/* ----- 搜索中心层 ----- */
+#search-container {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: 100%;
+  max-width: 600px;
+  padding: 0 20px;
+  z-index: 100;
+  /* 位于背景和浮窗之间 */
+  display: flex;
+  justify-content: center;
+}
+
+/* Material Design 3 风格搜索框 */
+.search-box {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  height: 52px;
+  background: #ffffff;
+  border-radius: 26px;
+  box-shadow: 0 2px 5px rgba(0, 0, 0, 0.1), 0 1px 2px rgba(0, 0, 0, 0.05);
+  padding: 0 16px;
+  transition: box-shadow 0.2s ease, transform 0.2s ease;
+}
+
+.search-box:hover,
+.search-box:focus-within {
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15), 0 2px 4px rgba(0, 0, 0, 0.1);
+  transform: translateY(-1px);
+}
+
+.search-box svg {
+  color: #5f6368;
+  width: 20px;
+  height: 20px;
+  margin-right: 12px;
+}
+
+.search-box input {
+  flex: 1;
+  height: 100%;
+  border: none;
+  outline: none;
+  background: transparent;
+  font-size: 16px;
+  color: #202124;
+  font-family: inherit;
+}
+
+.search-box input::placeholder {
+  color: #9aa0a6;
+}
+
+/* ----- 右下角浮动按钮动作区 ----- */
+
+/* 通用圆形按钮样式 */
+.floating-btn {
+  position: absolute;
+  bottom: 12px;
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: rgba(0, 0, 0, 0.15);
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
+  color: rgba(255, 255, 255, 0.65);
+  text-shadow: 0 1px 4px rgba(0, 0, 0, 0.3);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  z-index: 500;
+  transition: all 0.4s cubic-bezier(0.25, 0.8, 0.25, 1);
+  box-shadow: none;
+}
+
+.floating-btn:hover {
+  background: rgba(255, 255, 255, 0.15);
+  color: #fff;
+  border: 1px solid rgba(255, 255, 255, 0.25);
+  transform: translateY(-2px);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.25);
+}
+
+.floating-btn:active {
+  transform: translateY(0);
+}
+
+.floating-btn svg {
+  width: 20px;
+  height: 20px;
+}
+
+/* 收藏按钮 */
+#fav-btn {
+  right: 68px;
+}
+
+#fav-btn.active svg {
+  fill: #ff4b4b;
+  color: #ff4b4b;
+}
+
+/* 刷新按钮点击时的旋转动画 */
+@keyframes spin-refresh {
+  100% {
+    transform: rotate(360deg);
+  }
+}
+
+#refresh-btn.loading svg {
+  animation: spin-refresh 1s linear infinite;
+}
+
+/* ===========================
+   刷新 / 图库换源 悬浮组
+   =========================== */
+.refresh-wrapper {
+  position: absolute;
+  bottom: 12px;
+  right: 12px;
+  /* 原本 refresh-btn 是 80px 这里归位于之前的设置按钮处 */
+  width: 44px;
+  height: 44px;
+  z-index: 500;
+}
+
+/* 刷新按钮本身归零到wrapper中 */
+.refresh-wrapper #refresh-btn {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: auto;
+  bottom: auto;
+  z-index: 501;
+}
+
+/* 悬浮气泡菜单 */
+.source-menu {
+  position: absolute;
+  bottom: 58px;
+  /* 稍微抬高避免贴着按钮 */
+  right: -5px;
+  /* 中心靠齐 */
+  width: 200px;
+  background: rgba(24, 24, 24, 0.85);
+  backdrop-filter: blur(24px);
+  -webkit-backdrop-filter: blur(24px);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 12px;
+  padding: 10px;
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(16px) scale(0.95);
+  transform-origin: bottom right;
+  transition: all 0.35s cubic-bezier(0.2, 0.85, 0.3, 1);
+  box-shadow: 0 10px 40px rgba(0, 0, 0, 0.4);
+}
+
+/* 隐形的 Hover 桥接带，防止鼠标平移时断流 */
+.source-menu::after {
+  content: '';
+  position: absolute;
+  bottom: -20px;
+  right: 0;
+  width: 100%;
+  height: 20px;
+}
+
+/* 触发显示弹出层 (防误扫过，悬停 1 秒) */
+.refresh-wrapper:hover .source-menu {
+  opacity: 1;
+  pointer-events: auto;
+  transform: translateY(0) scale(1);
+  transition-delay: 1s;
+}
+
+/* 单选框列表重写 (更小巧精致) */
+.radio-group {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.radio-group label {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  cursor: pointer;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: transparent;
+  border: none;
+  transition: background-color 0.2s;
+}
+
+.radio-group label:hover {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.radio-group input[type="radio"] {
+  appearance: none;
+  width: 14px;
+  height: 14px;
+  border: 2px solid #a0a0a0;
+  margin: 0;
+  border-radius: 50%;
+  outline: none;
+  transition: all 0.2s;
+  position: relative;
+  flex-shrink: 0;
+}
+
+.radio-group input[type="radio"]:checked {
+  border-color: #8ab4f8;
+}
+
+.radio-group input[type="radio"]:checked::after {
+  content: '';
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: 6px;
+  height: 6px;
+  background: #8ab4f8;
+  border-radius: 50%;
+}
+
+.radio-group span {
+  font-size: 13px;
+  font-weight: 500;
+  color: #e3e3e3;
+  letter-spacing: 0.3px;
+}
+
+/* 附加功能子按钮（今天、清空） */
+.action-btn {
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  color: #c4c4c4;
+  padding: 3px 8px;
+  border-radius: 6px;
+  font-size: 11px;
+  cursor: pointer;
+  transition: all 0.2s;
+  flex-shrink: 0;
+  opacity: 0;
+  /* 平时隐藏极致收敛 */
+}
+
+/* 悬停列表项时再漏出辅助操作，保持清爽 */
+.radio-group label:hover .action-btn {
+  opacity: 1;
+}
+
+.action-btn:hover {
+  background: rgba(255, 255, 255, 0.25);
+  color: #fff;
+  border-color: rgba(255, 255, 255, 0.3);
+}

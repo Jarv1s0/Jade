@@ -1,0 +1,261 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+  <meta charset="UTF-8">
+  <title>Modern Bookmark Launcher</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+
+<body>
+
+  <!-- 1. 顶部面包屑 (进入文件夹时显示) -->
+  <div id="breadcrumb" class="breadcrumb" style="display: none;"></div>
+
+  <!-- 2. 主滚动内容区 -->
+  <main id="mainPanel">
+    <!-- 2.1 常用访问模块 -->
+    <div id="frequentSection">
+      <div class="section-header">常用访问</div>
+      <div class="frequent-grid" id="frequentGrid"></div>
+    </div>
+
+    <!-- 2.2 我的分组模块 -->
+    <div id="categorySection">
+      <div class="section-header">我的分组</div>
+      <div class="category-grid" id="categoryGrid"></div>
+    </div>
+
+    <!-- 2.3 最近访问模块 -->
+    <div id="recentSection" style="display: none;">
+      <div class="section-header">最近访问</div>
+      <div class="recent-list" id="recentListView"></div>
+    </div>
+
+    <!-- 2.4 搜索/列表视图列表 -->
+    <div class="recent-list" id="bookmarkList" style="display: none;"></div>
+  </main>
+
+  <!-- 3. 底部辅助操作带 (统一化) -->
+  <footer>
+    <div class="search-container">
+      <svg class="search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+        stroke-linecap="round" stroke-linejoin="round">
+        <circle cx="11" cy="11" r="8"></circle>
+        <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
+      </svg>
+      <input type="text" class="search-input" id="searchInput" placeholder="搜索书签..." autocomplete="off"
+        spellcheck="false">
+      <div class="shortcut-hint" id="shortcutHint">⌘K</div>
+    </div>
+
+    <div class="footer-actions">
+      <button class="footer-icon-btn" id="btnManageBookmarksBtn" title="书签管理">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+          stroke-linecap="round" stroke-linejoin="round">
+          <path d="M4 19.5v-15A2.5 2.5 0 0 1 6.5 2H20v20H6.5a2.5 2.5 0 0 1 0-5H20"></path>
+        </svg>
+        <span>书签管理</span>
+      </button>
+      <button class="footer-icon-btn" id="btnToolsMain" title="书签工具箱">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+          stroke-linecap="round" stroke-linejoin="round">
+          <rect x="3" y="8" width="18" height="12" rx="2" ry="2"></rect>
+          <path d="M7 8v-2a2 2 0 0 1 2-2h6a2 2 0 0 1 2 2v2"></path>
+          <line x1="8" y1="14" x2="16" y2="14"></line>
+        </svg>
+        <span>工具箱</span>
+      </button>
+    </div>
+  </footer>
+
+  <!-- 4. 各种弹窗/上下文菜单 -->
+  <!-- 工具箱弹窗 -->
+  <div id="toolsModal" class="modal">
+    <div class="tools-panel">
+      <div class="tools-header">
+        <button class="tools-icon-btn" id="toolsBackBtn" style="visibility: hidden;">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+            stroke-linecap="round" stroke-linejoin="round">
+            <polyline points="15 18 9 12 15 6"></polyline>
+          </svg>
+        </button>
+        <h3 id="toolsTitle" style="text-align: center; flex: 1;">书签工具箱</h3>
+        <button class="tools-icon-btn" id="toolsCloseBtn">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+            stroke-linecap="round" stroke-linejoin="round">
+            <line x1="18" y1="6" x2="6" y2="18"></line>
+            <line x1="6" y1="6" x2="18" y2="18"></line>
+          </svg>
+        </button>
+      </div>
+
+      <div class="tools-views-container">
+        <!-- 视图 A: 主菜单 -->
+        <div id="toolsMenuView" class="tools-view active">
+          <!-- 分组: 数据管理 -->
+          <div class="tool-group">
+            <div class="tool-group-title">数据管理</div>
+            <button class="tool-item" id="btnImportBookmarksNew">
+              <div class="tool-item-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none"
+                  stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                  <polyline points="17 8 12 3 7 8"></polyline>
+                  <line x1="12" y1="3" x2="12" y2="15"></line>
+                </svg></div>
+              <div class="tool-item-info">
+                <span class="tool-item-title">导入书签</span>
+                <span class="tool-item-desc" id="statusImport">从 HTML 文件恢复书签数据</span>
+              </div>
+            </button>
+            <button class="tool-item" id="btnExportBookmarksNew">
+              <div class="tool-item-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none"
+                  stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                  <polyline points="7 10 12 15 17 10"></polyline>
+                  <line x1="12" y1="15" x2="12" y2="3"></line>
+                </svg></div>
+              <div class="tool-item-info">
+                <span class="tool-item-title">导出书签</span>
+                <span class="tool-item-desc" id="statusExport">备份所有书签为 HTML 格式</span>
+              </div>
+            </button>
+          </div>
+
+          <!-- 分组: 清理与维护 -->
+          <div class="tool-group">
+            <div class="tool-group-title">清理与维护</div>
+            <button class="tool-item" id="btnFindDuplicates">
+              <div class="tool-item-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none"
+                  stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"></path>
+                  <rect x="8" y="2" width="8" height="4" rx="1" ry="1"></rect>
+                </svg></div>
+              <div class="tool-item-info">
+                <span class="tool-item-title">扫描重复</span>
+                <span class="tool-item-desc" id="statusDuplicates">查找并清理包含相同网址的书签</span>
+              </div>
+            </button>
+            <button class="tool-item" id="btnFindBrokenLinks">
+              <div class="tool-item-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none"
+                  stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path>
+                  <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path>
+                </svg></div>
+              <div class="tool-item-info">
+                <span class="tool-item-title">检查失效链接</span>
+                <span class="tool-item-desc" id="statusBrokenLinks">探测无法访问的书签链接</span>
+              </div>
+            </button>
+            <button class="tool-item" id="btnCleanEmptyFolders">
+              <div class="tool-item-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none"
+                  stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path>
+                  <line x1="9" y1="14" x2="15" y2="14"></line>
+                </svg></div>
+              <div class="tool-item-info">
+                <span class="tool-item-title">空文件夹</span>
+                <span class="tool-item-desc" id="statusEmptyFolders">清理不再包含任何子项的文件夹</span>
+              </div>
+            </button>
+          </div>
+
+          <!-- 分组: 分析与高级 -->
+          <div class="tool-group" style="margin-bottom: 0;">
+            <div class="tool-group-title">分析与高级</div>
+            <button class="tool-item" id="btnBookmarkStats">
+              <div class="tool-item-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none"
+                  stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <line x1="18" y1="20" x2="18" y2="10"></line>
+                  <line x1="12" y1="20" x2="12" y2="4"></line>
+                  <line x1="6" y1="20" x2="6" y2="14"></line>
+                </svg></div>
+              <div class="tool-item-info">
+                <span class="tool-item-title">统计报告</span>
+                <span class="tool-item-desc" id="statusStats">分析书签结构、层级及域名分布</span>
+              </div>
+            </button>
+            <button class="tool-item" id="btnBatchReplaceUrl">
+              <div class="tool-item-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none"
+                  stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M12 20h9"></path>
+                  <path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"></path>
+                </svg></div>
+              <div class="tool-item-info">
+                <span class="tool-item-title">批量替换 URL</span>
+                <span class="tool-item-desc" id="statusReplaceUrl">使用正则匹配并修改多个链接后缀</span>
+              </div>
+            </button>
+          </div>
+        </div> <!-- End of toolsMenuView -->
+
+        <!-- 视图 B: 具体工具展现区 -->
+        <div id="toolsDetailView" class="tools-view" style="display: none;">
+          <div class="tool-detail-container"
+            style="display: flex; flex-direction: column; gap: 16px; min-height: 100%; text-align: left;">
+            <div id="toolDetailMainAction" class="tool-detail-main-action"
+              style="display:flex; flex-direction:column; gap:12px; width:100%;"></div>
+
+            <div id="toolDetailStatus" class="tool-detail-status"
+              style="display:none; font-size:13px; color:var(--text-secondary); align-items:center; justify-content:center; text-align:center; gap:8px;">
+            </div>
+
+            <div class="tools-result-area" id="toolsResultList"
+              style="flex:1; overflow-y:auto; border-radius:8px; margin: 0 -4px; padding: 0 4px;">
+            </div>
+
+            <div style="margin-top: auto;">
+              <div id="toolDetailWarning" class="tool-detail-warning"
+                style="display:none; color:var(--text-secondary); font-size:12px; padding:12px 16px; background:var(--bg-hover); border-radius:8px; border:1px solid var(--border-color); margin-bottom:12px;">
+              </div>
+
+              <div id="toolDetailFooter" class="tool-detail-footer"
+                style="display:none; padding-top:16px; border-top:1px solid var(--border-color); gap:12px;"></div>
+            </div>
+          </div>
+        </div>
+      </div> <!-- End of tools-views-container -->
+    </div>
+  </div>
+
+  <!-- 编辑弹窗 -->
+  <div class="modal" id="editModal">
+    <div class="modal-content small">
+      <div class="modal-header">
+        <h2 id="editModalTitle">编辑书签</h2>
+      </div>
+      <div class="modal-body">
+        <div class="form-group">
+          <label>名称</label>
+          <input type="text" id="editTitleInput" placeholder="书签名称">
+        </div>
+        <div class="form-group" id="editUrlGroup">
+          <label>网址</label>
+          <input type="text" id="editUrlInput" placeholder="https://...">
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="footer-icon-btn" id="editCancelBtn">取消</button>
+        <button class="footer-icon-btn primary-btn" id="editSaveBtn">保存</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 上下文菜单 -->
+  <div id="contextMenu" class="context-menu">
+    <div class="menu-item" id="menuPin">置顶到常用访问</div>
+    <div class="menu-item" id="menuSortName">按名称排序</div>
+    <div class="menu-item" id="menuSortTime">按时间排序</div>
+    <div class="menu-divider"></div>
+    <div class="menu-item" id="menuEdit">编辑</div>
+    <div class="menu-item danger" id="menuDelete">删除</div>
+    <div class="menu-item" id="menuNotRecommend">不再推荐</div>
+  </div>
+
+  <!-- 隐藏的 File Input 用于导入 -->
+  <input type="file" id="importFileInput" style="display: none;" accept=".html">
+
+  <script src="popup.js"></script>
+</body>
+
+</html>

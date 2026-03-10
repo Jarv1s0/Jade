@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>新标签页</title>
+  <link rel="icon" type="image/png" sizes="32x32" href="icons/icon32.png">
+  <link rel="icon" type="image/png" sizes="16x16" href="icons/icon16.png">
+  <link rel="stylesheet" href="style.css">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500&display=swap" rel="stylesheet">
+</head>
+
+<body>
+  <!-- 背景壁纸层 -->
+  <div id="bg-wrapper">
+    <div id="bg-image"></div>
+    <div id="bg-overlay"></div>
+  </div>
+
+
+  <!-- 壁纸版权信息 -->
+  <footer id="bg-credit">
+    <span id="bg-copyright" title="点击查看壁纸故事"></span>
+  </footer>
+
+  <!-- 故事卡片（全宽弹层，脱离 footer 以突破 z-index 限制） -->
+  <div id="story-card" class="story-card">
+    <div class="story-header">
+      <span id="story-title" class="story-title"></span>
+      <button id="story-close" class="story-close" title="关闭">&times;</button>
+    </div>
+    <div id="story-body" class="story-body"></div>
+  </div>
+
+  <!-- 收藏按钮 -->
+  <button id="fav-btn" class="floating-btn" title="收藏这张壁纸">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"
+      stroke-linejoin="round">
+      <path
+        d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z">
+      </path>
+    </svg>
+  </button>
+
+  <!-- 刷新/图库 悬浮组 -->
+  <div class="refresh-wrapper" id="refresh-wrapper">
+    <!-- 刷新按钮 -->
+    <button id="refresh-btn" class="floating-btn" title="换一张壁纸 / 悬停选壁纸源">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"
+        stroke-linejoin="round">
+        <polyline points="23 4 23 10 17 10"></polyline>
+        <polyline points="1 20 1 14 7 14"></polyline>
+        <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path>
+      </svg>
+    </button>
+
+    <!-- 悬浮弹出的图库菜单 -->
+    <div class="source-menu" id="source-menu">
+      <div class="radio-group" id="provider-selector">
+        <label>
+          <input type="radio" name="provider" value="bing">
+          <span style="flex: 1;">必应主页</span>
+          <button id="bing-today-btn" type="button" class="action-btn" title="回到今天的壁纸">今天</button>
+        </label>
+        <label>
+          <input type="radio" name="provider" value="nasa">
+          <span style="flex: 1;">NASA天文</span>
+          <button id="nasa-today-btn" type="button" class="action-btn" title="回到今天的天文图">今天</button>
+        </label>
+        <label>
+          <input type="radio" name="provider" value="picsum">
+          <span>无尽随机</span>
+        </label>
+        <label>
+          <input type="radio" name="provider" value="favorites">
+          <span style="flex: 1;">我的收藏</span>
+          <button id="clear-favorites-btn" type="button" class="action-btn" title="清空所有收藏">清空</button>
+        </label>
+      </div>
+    </div>
+  </div>
+
+  <script src="script.js"></script>
+</body>
+
+</html>

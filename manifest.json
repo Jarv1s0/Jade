@@ -1,0 +1,37 @@
+{
+    "manifest_version": 3,
+    "name": "Jade",
+    "version": "1.0",
+    "description": "书签管理 + 新标签页壁纸",
+    "permissions": [
+        "bookmarks",
+        "tabs",
+        "favicon",
+        "sessions",
+        "history",
+        "sidePanel",
+        "storage",
+        "downloads"
+    ],
+    "host_permissions": [
+        "https://www.bing.com/*",
+        "https://cn.bing.com/*",
+        "https://bing.ee123.net/*",
+        "https://api.nasa.gov/*",
+        "https://picsum.photos/*",
+        "https://translate.googleapis.com/*",
+        "https://api.mymemory.translated.net/*"
+    ],
+    "action": {
+        "default_popup": "bookmarks/popup.html"
+    },
+    "side_panel": {
+        "default_path": "bookmarks/popup.html"
+    },
+    "chrome_url_overrides": {
+        "newtab": "newtab/index.html"
+    },
+    "icons": {
+        "128": "bookmarks/icon128.png"
+    }
+}
