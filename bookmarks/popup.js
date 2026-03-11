@@ -39,8 +39,9 @@ document.addEventListener('DOMContentLoaded', function () {
   const menuSortTime = document.getElementById('menuSortTime');
   const menuEdit = document.getElementById('menuEdit');
   const menuDelete = document.getElementById('menuDelete');
-  const menuNotRecommend = document.getElementById('menuNotRecommend');
-
+  const menuAddToGroup = document.getElementById('menuAddToGroup');
+  const menuRemoveRecent = document.getElementById('menuRemoveRecent');
+  const menuDivider1 = document.getElementById('menuDivider1');
   const editModal = document.getElementById('editModal');
   const editModalTitle = document.getElementById('editModalTitle');
   const editTitleInput = document.getElementById('editTitleInput');
@@ -51,6 +52,10 @@ document.addEventListener('DOMContentLoaded', function () {
 
   const importFileInput = document.getElementById('importFileInput');
 
+  // Drag and Drop (Bookmark List)
+  let draggedItem = null;
+  let draggedItemId = null;
+
   // State
   let currentFolderId = '1'; // Default: Bookmarks Bar
   let navigationStack = [];
@@ -60,11 +65,11 @@ document.addEventListener('DOMContentLoaded', function () {
   let targetNodeDomain = null; // New for history items
   let targetFrequentUrl = null; // 常用卡片当前 URL
   let pinnedIds = new Set();
-  let historyBlacklist = new Set();
   let frequentOrder = []; // 用户自定义的常用访问排序
   let frequentCustomTitles = {}; // 用户自定义的常用卡片显示名称
   let frequentCustomUrls = {}; // 用户自定义的常用卡片 URL
   let currentFrequentItems = []; // 当前显示的 frequent 列表引用
+  let hiddenRecentUrls = []; // 被用户移除的最近访问URL
 
   // 借助 chrome.extension.getViews 探测侧边栏，这比 innerHeight 更可靠
   let isSidePanel = false;
@@ -95,7 +100,7 @@ document.addEventListener('DOMContentLoaded', function () {
 
   function init() {
     // 载入置顶、黑名单、排序和自定义标题，然后构建首页
-    chrome.storage.local.get(['pinned_bookmarks', 'history_blacklist', 'frequent_order', 'frequent_custom_titles', 'frequent_custom_urls'], (res) => {
+    chrome.storage.local.get(['pinned_bookmarks', 'frequent_order', 'frequent_custom_titles', 'frequent_custom_urls', 'hidden_recent_urls'], (res) => {
       if (res.pinned_bookmarks) {
         pinnedIds = new Set(res.pinned_bookmarks);
       }
@@ -108,8 +113,8 @@ document.addEventListener('DOMContentLoaded', function () {
       if (res.frequent_custom_urls) {
         frequentCustomUrls = res.frequent_custom_urls;
       }
-      if (res.history_blacklist) {
-        historyBlacklist = new Set(res.history_blacklist);
+      if (res.hidden_recent_urls) {
+        hiddenRecentUrls = res.hidden_recent_urls;
       }
 
       chrome.bookmarks.get('1', (nodes) => {
@@ -207,64 +212,83 @@ document.addEventListener('DOMContentLoaded', function () {
   }
 
   function buildFrequents() {
+    frequentSection.style.display = 'block';
     frequentGrid.innerHTML = '';
 
     const renderData = (frequents) => {
-      frequentSection.style.display = 'block';
       frequentGrid.innerHTML = '';
       currentFrequentItems = frequents.slice(0, 8);
       let dragSrcIndex = null;
 
+      if (currentFrequentItems.length === 0) {
+        frequentGrid.innerHTML = `
+          <div class="empty-pinned-state" style="grid-column: span 4;">
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M16 12V4h1V2H7v2h1v8l-2 2v2h5.2v6h1.6v-6H18v-2l-2-2z"/>
+            </svg>
+            <div>将你最常访问的网站添加到这里<br>最多 8 个，仅由你手动管理。</div>
+          </div>
+        `;
+        return;
+      }
+
       currentFrequentItems.forEach((item, itemIndex) => {
         const a = document.createElement('a');
-        const isPinned = pinnedIds.has(item.id) || pinnedIds.has(item.domain);
-        a.className = `frequent-card${isPinned ? ' is-pinned' : ''}`;
+        const isPinned = true;
+        const isFolder = !item.url;
+        a.className = 'frequent-card is-pinned';
         a.href = '#';
-        a.title = item.url;
+        if (!isFolder) a.title = item.url;
         a.draggable = true;
         a.dataset.index = itemIndex;
 
         let domain = item.domain;
-        if (!domain) {
+        if (!domain && !isFolder) {
           try { domain = new URL(item.url || 'about:blank').hostname; } catch (e) { domain = 'unknown'; }
         }
 
-        // 唯一标识符
         const itemKey = item.id || domain;
-
-        // 生成干净的短名称（优先使用自定义标题）
-        let shortName = frequentCustomTitles[itemKey] || item.title || domain;
+        let shortName = frequentCustomTitles[itemKey] || item.title || domain || '未命名文件夹';
         shortName = shortName.split(' - ')[0].split(' | ')[0].split(' _ ')[0].trim();
         if (shortName.length > 10) shortName = shortName.substring(0, 10) + '..';
 
+        const iconHtml = isFolder
+          ? `<svg viewBox="0 0 24 24" fill="currentColor" width="24" height="24" style="color:var(--text-tertiary)">
+               <path d="M10 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2h-8l-2-2z"/>
+             </svg>`
+          : `<img src="chrome-extension://${chrome.runtime.id}/_favicon/?pageUrl=${encodeURIComponent(item.url)}&size=128"
+                  onerror="this.src='https://www.google.com/s2/favicons?domain=${domain}&sz=128'"
+                  class="frequent-favicon">`;
+
         a.innerHTML = `
-              <div class="frequent-actions" title="${isPinned ? '取消置顶' : '置顶'}">
-                  <svg width="12" height="12" viewBox="0 0 24 24" fill="${isPinned ? 'var(--accent-color)' : 'none'}" stroke="${isPinned ? 'var(--accent-color)' : 'currentColor'}" stroke-width="2.5" style="opacity: ${isPinned ? 1 : 0}; transform: rotate(45deg); transition: opacity 0.25s ease, fill 0.25s ease;"><path d="M16 12V4h1V2H7v2h1v8l-2 2v2h5.2v6h1.6v-6H18v-2l-2-2z"/></svg>
+              <div class="frequent-actions" title="取消置顶">
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="var(--accent-color)" stroke="var(--accent-color)" stroke-width="2.5" style="opacity: 0; transform: rotate(45deg); transition: opacity 0.25s ease, fill 0.25s ease;"><path d="M16 12V4h1V2H7v2h1v8l-2 2v2h5.2v6h1.6v-6H18v-2l-2-2z"/></svg>
               </div>
               <div class="frequent-icon-wrap">
-                  <img src="chrome-extension://${chrome.runtime.id}/_favicon/?pageUrl=${encodeURIComponent(item.url)}&size=64"
-                       onerror="this.src='https://www.google.com/s2/favicons?domain=${domain}&sz=64'"
-                       class="frequent-favicon">
+                  ${iconHtml}
               </div>
               <span class="frequent-title">${escapeHtml(shortName)}</span>
           `;
 
         a.onclick = (e) => {
           e.preventDefault();
-          chrome.tabs.create({ url: frequentCustomUrls[itemKey] || item.url });
+          if (isFolder) {
+            enterFolder(item.id, item.title, item.isUncategorized);
+          } else {
+            chrome.tabs.create({ url: frequentCustomUrls[itemKey] || item.url });
+          }
         };
 
-        // Hover effect for the pin icon
         a.addEventListener('mouseenter', () => {
           const svg = a.querySelector('.frequent-actions svg');
-          if (svg && !isPinned) svg.style.opacity = '0.5';
+          if (svg) svg.style.opacity = '1';
         });
         a.addEventListener('mouseleave', () => {
           const svg = a.querySelector('.frequent-actions svg');
-          if (svg && !isPinned) svg.style.opacity = '0';
+          if (svg) svg.style.opacity = '0';
         });
 
-        // Click on pin icon directly
+        // Click on pin icon directly (Remove from pinned)
         a.querySelector('.frequent-actions').addEventListener('click', (e) => {
           e.preventDefault();
           e.stopImmediatePropagation();
@@ -282,13 +306,8 @@ document.addEventListener('DOMContentLoaded', function () {
           const targetId = item.id || domain;
           setTimeout(() => {
             if (pinnedIds.has(targetId)) {
-              pinnedIds.delete(targetId);
-            } else {
-              pinnedIds.add(targetId);
+              removeFromPinnedWithUndo(targetId, itemIndex);
             }
-            chrome.storage.local.set({ pinned_bookmarks: Array.from(pinnedIds) }, () => {
-              buildFrequents();
-            });
           }, 200);
         });
 
@@ -303,7 +322,6 @@ document.addEventListener('DOMContentLoaded', function () {
         a.addEventListener('dragover', (e) => {
           e.preventDefault();
           e.dataTransfer.dropEffect = 'move';
-          // 清除所有 drag-over 指示
           frequentGrid.querySelectorAll('.frequent-card').forEach(c => c.classList.remove('drag-over'));
           if (parseInt(a.dataset.index) !== dragSrcIndex) {
             a.classList.add('drag-over');
@@ -321,15 +339,12 @@ document.addEventListener('DOMContentLoaded', function () {
           const toIndex = parseInt(a.dataset.index);
           if (fromIndex === null || fromIndex === toIndex) return;
 
-          // 重排数组
           const movedItem = currentFrequentItems.splice(fromIndex, 1)[0];
           currentFrequentItems.splice(toIndex, 0, movedItem);
 
-          // 保存新顺序（以 id 或 domain 为标识符）
           frequentOrder = currentFrequentItems.map(it => it.id || it.domain || '');
           chrome.storage.local.set({ frequent_order: frequentOrder });
 
-          // 重新渲染
           renderData(currentFrequentItems);
         });
 
@@ -352,124 +367,50 @@ document.addEventListener('DOMContentLoaded', function () {
       });
     };
 
-    // 智能筛选逻辑: 混合 Pinned 书签和长期高频访问历史 (聚合到域名级别)
     chrome.bookmarks.getTree((tree) => {
       let pinnedNodes = [];
       function traverse(nodes) {
         nodes.forEach(n => {
-          if (n.url && pinnedIds.has(n.id)) pinnedNodes.push(n);
+          if (pinnedIds.has(n.id)) pinnedNodes.push(n);
           if (n.children) traverse(n.children);
         });
       }
       traverse(tree);
 
-      // 获取过去 30 天的历史记录，计算 Top Sites
-      chrome.history.search({ text: '', maxResults: 1000, startTime: Date.now() - 30 * 24 * 3600 * 1000 }, (historyItems) => {
-        const domainMap = new Map();
+      // 清理幽灵 ID：pinnedIds 中存在但书签树中找不到的无效 ID
+      const foundIds = new Set(pinnedNodes.map(n => n.id));
+      const orphanIds = Array.from(pinnedIds).filter(id => !foundIds.has(id));
+      if (orphanIds.length > 0) {
+        orphanIds.forEach(id => pinnedIds.delete(id));
+        chrome.storage.local.set({ pinned_bookmarks: Array.from(pinnedIds) });
+        console.info(`[Jade] 已清理 ${orphanIds.length} 个无效置顶 ID:`, orphanIds);
+      }
 
-        historyItems.forEach(hi => {
-          if (!hi.url || hi.url.startsWith('chrome://')) return;
-          try {
-            const urlObj = new URL(hi.url);
-            // 过滤常见的搜索引擎跳转，避免无意义的记录
-            if (urlObj.hostname.includes('google.com') && urlObj.pathname.startsWith('/search')) return;
-            if (urlObj.hostname.includes('baidu.com') && urlObj.pathname.startsWith('/s')) return;
-            if (urlObj.hostname.includes('bing.com') && urlObj.pathname.startsWith('/search')) return;
-
-            const domain = urlObj.hostname;
-            if (!domainMap.has(domain)) {
-              domainMap.set(domain, {
-                domain: domain,
-                url: urlObj.origin, // 使用根域名作为入口更稳妥
-                title: hi.title || domain,
-                visitCount: 0,
-                lastVisitTime: hi.lastVisitTime
-              });
-            }
-
-            // 计分: 时间衰减模型 (简单的线性衰减)
-            const daysAgo = (Date.now() - hi.lastVisitTime) / (1000 * 3600 * 24);
-            let weight = 1;
-            if (daysAgo < 7) weight = 1.5; // 最近一周加权
-            if (daysAgo > 14) weight = 0.5; // 两周前降权
-
-            domainMap.get(domain).visitCount += (hi.visitCount || 1) * weight;
-
-            // 保留该域名下最新的一次标题，如果有更合适的
-            if (hi.lastVisitTime > domainMap.get(domain).lastVisitTime && hi.title) {
-              domainMap.get(domain).title = hi.title;
-              domainMap.get(domain).lastVisitTime = hi.lastVisitTime;
-            }
-          } catch (e) { }
-        });
-
-        let topSites = Array.from(domainMap.values()).sort((a, b) => b.visitCount - a.visitCount);
-
-        // 从 topSites 里挑出 Pinned domains
-        let pinnedFromHistory = topSites.filter(site => pinnedIds.has(site.domain));
-
-        // 过滤掉黑名单中的推荐项
-        const unpinnedTopSites = topSites.filter(site => !pinnedIds.has(site.domain) && !historyBlacklist.has(site.domain));
-
-        // 组装最终列表: Pinned (Bookmarks) + Pinned (History) + Top Unpinned
-        let finalItems = [];
-
-        // 1. 放入所有的 Pinned，按用户置顶的先后顺序排列
-        const pinnedList = [...pinnedNodes, ...pinnedFromHistory];
-        const pinnedOrder = Array.from(pinnedIds);
-        pinnedList.sort((a, b) => {
-          const idA = a.id || a.domain;
-          const idB = b.id || b.domain;
-          const indexA = pinnedOrder.indexOf(idA);
-          const indexB = pinnedOrder.indexOf(idB);
-          return indexA - indexB;
-        });
-
-        // 记录已经存在的域名，防止重复
-        const existingDomains = new Set();
-
-        for (const item of pinnedList) {
-          if (finalItems.length >= 8) break;
-          const domain = item.domain || (item.url ? new URL(item.url).hostname : '');
-          if (domain && !existingDomains.has(domain)) {
-            finalItems.push(item);
-            existingDomains.add(domain);
-          }
-        }
-
-        // 2. 补足余位 (最多凑够 8 个)
-        for (let site of unpinnedTopSites) {
-          if (finalItems.length >= 8) break;
-          if (!existingDomains.has(site.domain)) {
-            finalItems.push(site);
-            existingDomains.add(site.domain);
-          }
-        }
-
-        // 3. 应用用户自定义的排序
-        finalItems.sort((a, b) => {
-          const idA = a.id || a.domain;
-          const idB = b.id || b.domain;
-          const indexA = frequentOrder.indexOf(idA);
-          const indexB = frequentOrder.indexOf(idB);
-
-          // 如果都在 frequentOrder 中，按其顺序排
-          if (indexA !== -1 && indexB !== -1) return indexA - indexB;
-          // 如果只有 A 在 frequentOrder 中，A 靠前
-          if (indexA !== -1) return -1;
-          // 如果只有 B 在 frequentOrder 中，B 靠前
-          if (indexB !== -1) return 1;
-          // 否则保持原有相对顺序
-          return 0;
-        });
-
-
-        if (finalItems.length > 0) {
-          renderData(finalItems);
-        } else {
-          frequentSection.style.display = 'none';
-        }
+      const pinnedOrder = Array.from(pinnedIds);
+      pinnedNodes.sort((a, b) => {
+        const idA = a.id;
+        const idB = b.id;
+        const indexA = pinnedOrder.indexOf(idA);
+        const indexB = pinnedOrder.indexOf(idB);
+        return indexA - indexB;
       });
+
+      let finalItems = pinnedNodes;
+
+      // 应用用户自定义的排序 (frequentOrder)
+      finalItems.sort((a, b) => {
+        const idA = a.id;
+        const idB = b.id;
+        const indexA = frequentOrder.indexOf(idA);
+        const indexB = frequentOrder.indexOf(idB);
+
+        if (indexA !== -1 && indexB !== -1) return indexA - indexB;
+        if (indexA !== -1) return -1;
+        if (indexB !== -1) return 1;
+        return 0;
+      });
+
+      renderData(finalItems.slice(0, 8));
     });
   }
 
@@ -494,7 +435,7 @@ document.addEventListener('DOMContentLoaded', function () {
       }
 
       // 补充历史记录
-      chrome.history.search({ text: '', maxResults: 5, startTime: Date.now() - 24 * 3600 * 1000 }, (historyItems) => {
+      chrome.history.search({ text: '', maxResults: 15, startTime: Date.now() - 24 * 3600 * 1000 }, (historyItems) => {
         const hItems = historyItems.filter(hi => !recentItems.find(ri => ri.url === hi.url)).map(hi => ({
           title: hi.title || hi.url,
           url: hi.url,
@@ -503,19 +444,37 @@ document.addEventListener('DOMContentLoaded', function () {
           timestamp: hi.lastVisitTime
         }));
 
-        const combined = [...recentItems, ...hItems].slice(0, 5);
+        const combined = [...recentItems, ...hItems]
+          .filter(item => !hiddenRecentUrls.includes(item.url))
+          .sort((a, b) => b.timestamp - a.timestamp)
+          .slice(0, 5);
 
-        if (combined.length > 0) {
-          recentSection.style.display = 'block';
-          combined.forEach(item => {
-            const a = document.createElement('a');
-            a.className = 'recent-item';
-            a.href = '#';
+        recentSection.style.display = 'block';
+        if (combined.length === 0) {
+          recentListView.innerHTML = `
+            <div class="empty-state" style="padding: 16px; color: var(--text-tertiary); text-align: center; border-radius: 8px; background: var(--bg-hover);">
+              暂无最近访问记录
+            </div>
+          `;
+          return;
+        }
+
+        combined.forEach(item => {
+          const a = document.createElement('a');
+          a.className = 'recent-item';
+          a.href = '#';
+          
+          // 右键菜单
+          a.addEventListener('contextmenu', (e) => {
+            e.preventDefault();
+            targetNodeDomain = item.url; // 借用 domain 存储 url 或 id 以供后续移除动作
+            showContextMenu(e, false, false, true);
+          });
 
             const domain = new URL(item.url || 'about:blank').hostname;
 
             const timeAgo = getTimeAgo(item.timestamp || Date.now());
-            const metaInfo = `${item.type} · ${timeAgo}`;
+            const metaInfo = item.type === '历史记录' ? timeAgo : `${item.type} · ${timeAgo}`;
 
             a.innerHTML = `
                 <div class="recent-favicon">
@@ -526,34 +485,15 @@ document.addEventListener('DOMContentLoaded', function () {
                   <div class="recent-title" title="${escapeHtml(item.title)}">${escapeHtml(item.title)}</div>
                   <div class="recent-meta">${escapeHtml(metaInfo)}</div>
                 </div>
-                <div class="quick-actions">
-                  <button class="icon-btn copy-btn" title="复制链接" data-url="${item.url}">
-                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                      <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
-                      <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
-                    </svg>
-                  </button>
-                </div>
             `;
 
             a.onclick = (e) => {
-              if (e.target.closest('.copy-btn')) {
-                e.preventDefault();
-                navigator.clipboard.writeText(item.url);
-                const iconBtn = a.querySelector('.copy-btn');
-                iconBtn.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#34C759" stroke-width="2"><polyline points="20 6 9 17 4 12"></polyline></svg>`;
-                setTimeout(() => {
-                  iconBtn.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>`;
-                }, 1500);
-                return;
-              }
               e.preventDefault();
               chrome.tabs.create({ url: item.url });
             };
 
-            recentListView.appendChild(a);
-          });
-        }
+          recentListView.appendChild(a);
+        });
       });
     });
   }
@@ -660,23 +600,35 @@ document.addEventListener('DOMContentLoaded', function () {
 
   function getTimeAgo(timestamp) {
     if (!timestamp) return '未知时间';
-    // 兼容秒级时间戳 (Chrome sessions 有时返回秒)
     let ts = timestamp;
     if (ts < 10000000000) ts *= 1000;
 
     const diff = Date.now() - ts;
     const mins = Math.floor(diff / 60000);
+    
     if (mins < 1) return '刚刚';
     if (mins < 60) return `${mins} 分钟前`;
 
-    const hours = Math.floor(mins / 60);
-    if (hours < 24) return `${hours} 小时前`;
-
-    const days = Math.floor(hours / 24);
-    if (days === 1) return '昨天';
-    if (days < 7) return `${days} 天前`;
-
     const date = new Date(ts);
+    const today = new Date();
+    
+    // 检查是否为今天
+    const isToday = date.getDate() === today.getDate() && 
+                    date.getMonth() === today.getMonth() && 
+                    date.getFullYear() === today.getFullYear();
+                    
+    // 检查是否为昨天
+    const yesterday = new Date(today.getTime() - 86400000);
+    const isYesterday = date.getDate() === yesterday.getDate() && 
+                        date.getMonth() === yesterday.getMonth() && 
+                        date.getFullYear() === yesterday.getFullYear();
+
+    const hh = date.getHours().toString().padStart(2, '0');
+    const mm = date.getMinutes().toString().padStart(2, '0');
+
+    if (isToday) return `今天 ${hh}:${mm}`;
+    if (isYesterday) return `昨天 ${hh}:${mm}`;
+    
     return `${date.getMonth() + 1}月${date.getDate()}日`;
   }
 
@@ -697,13 +649,29 @@ document.addEventListener('DOMContentLoaded', function () {
 
   function loadStandardFolder(id, isUncategorized = false) {
     currentFolderId = id;
+    
+    if (isUncategorized) {
+      chrome.bookmarks.getTree((tree) => {
+        const rootNodes = tree[0].children;
+        const rootBookmarks = [];
+        // 汇集所有的根目录直属书签
+        rootNodes.forEach(rootNode => {
+          if (rootNode.children) {
+            rootNode.children.forEach(child => {
+              if (child.url) {
+                rootBookmarks.push({ ...child, parentTitle: rootNode.title || '根目录' });
+              }
+            });
+          }
+        });
+        renderStandardList(rootBookmarks);
+        updateBreadcrumbUI();
+      });
+      return;
+    }
+
     chrome.bookmarks.getChildren(id, (children) => {
-      let items = children;
-      // 如果是“未分类书签”视图，只保留链接，过滤掉所有文件夹
-      if (isUncategorized) {
-        items = children.filter(child => child.url);
-      }
-      renderStandardList(items);
+      renderStandardList(children);
       updateBreadcrumbUI();
     });
   }
@@ -734,15 +702,28 @@ document.addEventListener('DOMContentLoaded', function () {
 
     const backBtn = document.createElement('span');
     backBtn.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align: middle; margin-right: 2px;"><polyline points="15 18 9 12 15 6"></polyline></svg> 返回`;
+    
+    // 允许拖放到“返回”按钮上 (移动到上一级)
+    const parentNode = navigationStack.length > 1 ? navigationStack[navigationStack.length - 2] : null; // 上一级目录 (或 undefined 当返回首页时不支持)
+    if (parentNode && parentNode.id !== '0') {
+        backBtn.addEventListener('dragover', (e) => { e.preventDefault(); backBtn.classList.add('drag-over'); e.dataTransfer.dropEffect = 'move'; });
+        backBtn.addEventListener('dragleave', () => backBtn.classList.remove('drag-over'));
+        backBtn.addEventListener('drop', (e) => {
+            e.preventDefault();
+            backBtn.classList.remove('drag-over');
+            if (!draggedItemId) return;
+            chrome.bookmarks.move(draggedItemId, { parentId: parentNode.id }, () => {
+                if (!chrome.runtime.lastError && currentFolderId) loadStandardFolder(currentFolderId);
+            });
+        });
+    }
+    
     backBtn.onclick = () => {
       navigationStack.pop();
       if (navigationStack.length > 0) {
         const parent = navigationStack[navigationStack.length - 1];
-        if (navigationStack.length === 1) {
-          buildDashboard();
-        } else {
-          loadStandardFolder(parent.id, parent.isUncategorized);
-        }
+        if (navigationStack.length === 1) buildDashboard();
+        else loadStandardFolder(parent.id, parent.isUncategorized);
       }
     };
     breadcrumb.appendChild(backBtn);
@@ -755,6 +736,21 @@ document.addEventListener('DOMContentLoaded', function () {
     navigationStack.slice(1).forEach((crumb, index, arr) => {
       const span = document.createElement('span');
       span.textContent = crumb.title;
+      
+      // 允许拖放到中间任意一层级名上 (非当前目录时有效, 即并非最后一个子节点)
+      if (index < arr.length - 1 && crumb.id !== '0') {
+          span.addEventListener('dragover', (e) => { e.preventDefault(); span.classList.add('drag-over'); e.dataTransfer.dropEffect = 'move'; });
+          span.addEventListener('dragleave', () => span.classList.remove('drag-over'));
+          span.addEventListener('drop', (e) => {
+              e.preventDefault();
+              span.classList.remove('drag-over');
+              if (!draggedItemId) return;
+              chrome.bookmarks.move(draggedItemId, { parentId: crumb.id }, () => {
+                  if (!chrome.runtime.lastError && currentFolderId) loadStandardFolder(currentFolderId);
+              });
+          });
+      }
+
       span.onclick = () => {
         navigationStack = navigationStack.slice(0, index + 2);
         loadStandardFolder(crumb.id);
@@ -826,7 +822,6 @@ document.addEventListener('DOMContentLoaded', function () {
     }
   }
 
-  // --- LIST RENDERER (For Folder contents and Search results) ---
   function renderStandardList(items, isSearchResult = false) {
     bookmarkList.innerHTML = '';
 
@@ -835,14 +830,9 @@ document.addEventListener('DOMContentLoaded', function () {
       return;
     }
 
-    const pinnedItems = items.filter(item => pinnedIds.has(item.id));
-    const unpinnedItems = items.filter(item => !pinnedIds.has(item.id));
-    const sortedItems = [...pinnedItems, ...unpinnedItems];
-
-    sortedItems.forEach((item) => {
+    items.forEach((item) => {
       const a = document.createElement('a');
       const isFolder = !item.url;
-      const isPinned = pinnedIds.has(item.id);
 
       a.className = 'bookmark-item';
       a.href = '#';
@@ -869,16 +859,11 @@ document.addEventListener('DOMContentLoaded', function () {
         ? highlightText(displayTitle, searchInput.value.trim())
         : escapeHtml(displayTitle);
 
-      const pinIconHtml = isPinned
-        ? `<svg viewBox="0 0 24 24" fill="var(--accent-color)" width="12" height="12" style="margin-right:4px;"><path d="M16 12V4h1V2H7v2h1v8l-2 2v2h5.2v6h1.6v-6H18v-2l-2-2z"/></svg>`
-        : '';
-
       const metaSpan = item.meta ? `<span class="recent-meta" style="margin-left: 8px;">${item.meta}</span>` : '';
 
       a.innerHTML = `
         ${iconHtml}
         <div class="bookmark-info" style="flex-direction:row; align-items:center;">
-          ${pinIconHtml}
           <span class="bookmark-title" style="${isFolder ? 'font-weight:500;' : ''}">${titleHtml}</span>
           ${metaSpan}
         </div>
@@ -914,6 +899,83 @@ document.addEventListener('DOMContentLoaded', function () {
         showContextMenu(e, isFolder);
       });
 
+      // 拖拽排序逻辑 (仅在非搜索的真实文件夹内生效)
+      if (!isSearchResult && item.id) {
+        a.draggable = true;
+        
+        a.addEventListener('dragstart', (e) => {
+          draggedItem = a;
+          draggedItemId = item.id;
+          setTimeout(() => a.classList.add('dragging'), 0);
+          e.dataTransfer.effectAllowed = 'move';
+          e.dataTransfer.setData('text/plain', item.id);
+        });
+
+        a.addEventListener('dragend', () => {
+          a.classList.remove('dragging');
+          Array.from(bookmarkList.children).forEach(child => child.classList.remove('drag-over'));
+          draggedItem = null;
+          draggedItemId = null;
+        });
+
+        a.addEventListener('dragleave', () => {
+          a.classList.remove('drag-over');
+          a.classList.remove('drag-into');
+        });
+
+        a.addEventListener('dragover', (e) => {
+          e.preventDefault();
+          if (!draggedItem || draggedItem === a) return;
+          
+          e.dataTransfer.dropEffect = 'move';
+          const rect = a.getBoundingClientRect();
+          const y = e.clientY - rect.top;
+
+          a.classList.remove('drag-over', 'drag-into');
+
+          // 如果悬停目标是文件夹，且鼠标在其垂直中间 60% 区域，视为“拖入其中”
+          if (isFolder && y > rect.height * 0.2 && y < rect.height * 0.8) {
+            a.classList.add('drag-into');
+          } else {
+            a.classList.add('drag-over');
+          }
+        });
+
+        a.addEventListener('drop', (e) => {
+          e.preventDefault();
+          const isInto = a.classList.contains('drag-into');
+          a.classList.remove('drag-over', 'drag-into');
+          
+          if (!draggedItemId || draggedItemId === item.id) return;
+
+          // 场景 1: 跨级拖入某个文件夹内部
+          if (isInto && isFolder) {
+            chrome.bookmarks.move(draggedItemId, {
+               parentId: item.id
+            }, () => {
+              if (!chrome.runtime.lastError && currentFolderId) {
+                loadStandardFolder(currentFolderId);
+              }
+            });
+            return;
+          }
+
+          // 场景 2: 同级之间重新排序
+          const itemsArray = Array.from(bookmarkList.children);
+          const draggedIndex = itemsArray.indexOf(draggedItem);
+          const dropIndex = itemsArray.indexOf(a);
+
+          chrome.bookmarks.move(draggedItemId, {
+             parentId: item.parentId,
+             index: dropIndex
+          }, () => {
+            if (!chrome.runtime.lastError && currentFolderId) {
+                loadStandardFolder(currentFolderId);
+            }
+          });
+        });
+      }
+
       bookmarkList.appendChild(a);
     });
   }
@@ -932,17 +994,79 @@ document.addEventListener('DOMContentLoaded', function () {
     return div.innerHTML;
   }
 
-  // --- CONTEXT MENU & MODALS ---
-  function showContextMenu(e, isFolder, isFrequent = false) {
-    const activeId = targetNodeId || targetNodeDomain;
-    menuPin.textContent = pinnedIds.has(activeId) ? '取消置顶' : '置顶';
-    menuSortName.style.display = isFolder ? 'block' : 'none';
-    menuSortTime.style.display = isFolder ? 'block' : 'none';
-    menuNotRecommend.style.display = (isFrequent && !pinnedIds.has(activeId)) ? 'block' : 'none';
+  let undoTimeout = null;
+  function showToast(msg, undoCallback = null) {
+    const toast = document.getElementById('toast');
+    const toastMsg = document.getElementById('toastMsg');
+    const toastAction = document.getElementById('toastAction');
 
-    // 常用访问卡片：编辑始终显示（可编辑显示名称），删除仅书签项可用
-    menuEdit.style.display = (targetNodeId || isFrequent) ? 'block' : 'none';
-    menuDelete.style.display = targetNodeId ? 'block' : 'none';
+    if (!toast) return;
+
+    toastMsg.textContent = msg;
+    if (undoCallback) {
+      toastAction.style.display = 'block';
+      toastAction.onclick = () => {
+        undoCallback();
+        toast.classList.remove('show');
+        if (undoTimeout) clearTimeout(undoTimeout);
+      };
+    } else {
+      toastAction.style.display = 'none';
+    }
+
+    toast.classList.add('show');
+    if (undoTimeout) clearTimeout(undoTimeout);
+    undoTimeout = setTimeout(() => {
+      toast.classList.remove('show');
+    }, 4000);
+  }
+
+  function removeFromPinnedWithUndo(id, oldIndex) {
+    const orderBefore = Array.from(pinnedIds);
+    const frequentOrderBefore = [...frequentOrder];
+
+    pinnedIds.delete(id);
+    chrome.storage.local.set({ pinned_bookmarks: Array.from(pinnedIds) }, () => {
+      if (navigationStack.length <= 1) buildDashboard();
+      else refreshView();
+      showToast('已从我的置顶移除', () => {
+        // undo
+        pinnedIds = new Set(orderBefore);
+        frequentOrder = frequentOrderBefore;
+        chrome.storage.local.set({
+          pinned_bookmarks: Array.from(pinnedIds),
+          frequent_order: frequentOrder
+        }, () => {
+          if (navigationStack.length <= 1) buildDashboard();
+          else refreshView();
+        });
+      });
+    });
+  }
+
+  // --- CONTEXT MENU & MODALS ---
+  function showContextMenu(e, isFolder, isFrequent = false, isRecent = false) {
+    const activeId = targetNodeId || targetNodeDomain;
+
+    if (menuPin) {
+      if (isRecent) {
+        menuPin.style.display = 'none';
+      } else {
+        menuPin.style.display = 'block';
+        menuPin.textContent = pinnedIds.has(activeId) ? '从我的置顶移除' : '添加到我的置顶';
+      }
+    }
+
+    if (menuSortName) menuSortName.style.display = isFolder && !isRecent ? 'block' : 'none';
+    if (menuSortTime) menuSortTime.style.display = isFolder && !isRecent ? 'block' : 'none';
+
+    // 常用访问卡片或普通书签：编辑显示。最近访问：不显示
+    if (menuEdit) menuEdit.style.display = ((targetNodeId || isFrequent) && !isRecent) ? 'block' : 'none';
+    if (menuDelete) menuDelete.style.display = (targetNodeId && !isRecent) ? 'block' : 'none';
+
+    if (menuAddToGroup) menuAddToGroup.style.display = isRecent ? 'block' : 'none';
+    if (menuRemoveRecent) menuRemoveRecent.style.display = isRecent ? 'block' : 'none';
+    if (menuDivider1) menuDivider1.style.display = isRecent ? 'none' : 'block';
 
     let x = e.clientX;
     let y = e.clientY;
@@ -958,26 +1082,54 @@ document.addEventListener('DOMContentLoaded', function () {
   }
 
   function setupContextMenuAndModals() {
+    if (menuAddToGroup) {
+      menuAddToGroup.addEventListener('click', () => {
+        // TODO: 接入项目已有的“添加到分组”能力。这里预留调用接口
+        showToast('开发中：支持将其添加到我的分组');
+        contextMenu.style.display = 'none';
+      });
+    }
+
+    if (menuRemoveRecent) {
+      menuRemoveRecent.addEventListener('click', () => {
+        const activeUrl = targetNodeDomain; // recently saved url
+        if (!activeUrl) return;
+        
+        if (!hiddenRecentUrls.includes(activeUrl)) {
+          hiddenRecentUrls.push(activeUrl);
+          chrome.storage.local.set({ hidden_recent_urls: hiddenRecentUrls }, () => {
+            buildRecents();
+            showToast('已从最近访问列表移除', () => {
+              // 撤销逻辑
+              hiddenRecentUrls = hiddenRecentUrls.filter(u => u !== activeUrl);
+              chrome.storage.local.set({ hidden_recent_urls: hiddenRecentUrls }, () => {
+                buildRecents();
+              });
+            });
+          });
+        }
+        contextMenu.style.display = 'none';
+      });
+    }
+
     menuPin.addEventListener('click', () => {
       const activeId = targetNodeId || targetNodeDomain;
       if (!activeId) return;
-      if (pinnedIds.has(activeId)) {
-        pinnedIds.delete(activeId);
-      } else {
-        pinnedIds.add(activeId);
-      }
-      chrome.storage.local.set({ pinned_bookmarks: Array.from(pinnedIds) }, () => {
-        if (navigationStack.length <= 1) buildDashboard();
-        else refreshView();
-      });
-    });
 
-    menuNotRecommend.addEventListener('click', () => {
-      if (!targetNodeDomain) return;
-      historyBlacklist.add(targetNodeDomain);
-      chrome.storage.local.set({ history_blacklist: Array.from(historyBlacklist) }, () => {
-        buildDashboard();
-      });
+      if (pinnedIds.has(activeId)) {
+        removeFromPinnedWithUndo(activeId, -1);
+      } else {
+        if (pinnedIds.size >= 8) {
+          showToast('我的置顶最多只能添加 8 个网站');
+          return;
+        }
+        pinnedIds.add(activeId);
+        chrome.storage.local.set({ pinned_bookmarks: Array.from(pinnedIds) }, () => {
+          if (navigationStack.length <= 1) buildDashboard();
+          else refreshView();
+          showToast('已添加到我的置顶');
+        });
+      }
     });
 
     menuSortName.addEventListener('click', () => {
@@ -1148,6 +1300,8 @@ document.addEventListener('DOMContentLoaded', function () {
         toolDetailStatus.innerHTML = '<span style="color:var(--text-secondary)">状态：准备导出</span>';
 
         toolDetailMainAction.innerHTML = `<button id="btnExecuteExport" class="tool-btn tool-btn-primary">立即导出</button>`;
+        toolDetailWarning.style.display = 'block';
+        toolDetailWarning.innerHTML = '💡 提示：导出书签将把当前所有书签及目录结构备份为一个标准 HTML 文件，可用于在其他浏览器中恢复。';
 
         document.getElementById('btnExecuteExport').addEventListener('click', (e) => {
           e.target.className = 'tool-btn tool-btn-primary';
@@ -1167,6 +1321,8 @@ document.addEventListener('DOMContentLoaded', function () {
         toolDetailStatus.innerHTML = '<span style="color:var(--text-secondary)">状态：尚未扫描</span>';
 
         toolDetailMainAction.innerHTML = `<button id="btnStartFindDuplicates" class="tool-btn tool-btn-primary">开始扫描</button>`;
+        toolDetailWarning.style.display = 'block';
+        toolDetailWarning.innerHTML = '💡 提示：基于完全相同的 URL 来判断重复。批量清理重复项后将不可撤销退回，请谨慎操作。';
 
         document.getElementById('btnStartFindDuplicates').addEventListener('click', (e) => {
           const btn = e.target;
@@ -1260,6 +1416,8 @@ document.addEventListener('DOMContentLoaded', function () {
         toolDetailStatus.innerHTML = '<span style="color:var(--text-secondary)">状态：尚未分析</span>';
 
         toolDetailMainAction.innerHTML = `<button id="btnStartStats" class="tool-btn tool-btn-primary">开始分析</button>`;
+        toolDetailWarning.style.display = 'block';
+        toolDetailWarning.innerHTML = '💡 提示：全面统计书签库的层级结构与健康度，并生成域名的分布榜单，分析过程完全在本地进行。';
 
         document.getElementById('btnStartStats').addEventListener('click', (e) => {
           const btn = e.target;
@@ -1524,6 +1682,8 @@ document.addEventListener('DOMContentLoaded', function () {
         toolDetailStatus.style.display = 'flex';
         toolDetailStatus.innerHTML = '<span style="color:var(--text-secondary)">状态：尚未分析</span>';
         toolDetailMainAction.innerHTML = `<button id="btnStartCleanEmpty" class="tool-btn tool-btn-primary">开始扫描</button>`;
+        toolDetailWarning.style.display = 'block';
+        toolDetailWarning.innerHTML = '💡 提示：扫描并永久清理内部不含有任何书签、也没有有效子文件夹的空壳结构。';
 
         document.getElementById('btnStartCleanEmpty').addEventListener('click', (e) => {
           const btn = e.target;

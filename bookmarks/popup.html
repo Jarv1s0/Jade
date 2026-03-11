@@ -14,9 +14,9 @@
 
   <!-- 2. 主滚动内容区 -->
   <main id="mainPanel">
-    <!-- 2.1 常用访问模块 -->
+    <!-- 2.1 我的置顶模块 -->
     <div id="frequentSection">
-      <div class="section-header">常用访问</div>
+      <div class="section-header">我的置顶</div>
       <div class="frequent-grid" id="frequentGrid"></div>
     </div>
 
@@ -243,13 +243,20 @@
 
   <!-- 上下文菜单 -->
   <div id="contextMenu" class="context-menu">
-    <div class="menu-item" id="menuPin">置顶到常用访问</div>
+    <div class="menu-item" id="menuPin">添加到我的置顶</div>
+    <div class="menu-item" id="menuAddToGroup" style="display: none;">添加到我的分组</div>
     <div class="menu-item" id="menuSortName">按名称排序</div>
     <div class="menu-item" id="menuSortTime">按时间排序</div>
-    <div class="menu-divider"></div>
+    <div class="menu-item" id="menuRemoveRecent" style="display: none;">从最近访问列表移除</div>
+    <div class="menu-divider" id="menuDivider1"></div>
     <div class="menu-item" id="menuEdit">编辑</div>
     <div class="menu-item danger" id="menuDelete">删除</div>
-    <div class="menu-item" id="menuNotRecommend">不再推荐</div>
+  </div>
+
+  <!-- 全局 Toast 提示 -->
+  <div id="toast" class="toast">
+    <span id="toastMsg"></span>
+    <button id="toastAction" class="toast-action" style="display: none;">撤销</button>
   </div>
 
   <!-- 隐藏的 File Input 用于导入 -->
