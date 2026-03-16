@@ -49,6 +49,13 @@ document.addEventListener('DOMContentLoaded', function () {
   const editUrlInput = document.getElementById('editUrlInput');
   const editSaveBtn = document.getElementById('editSaveBtn');
   const editCancelBtn = document.getElementById('editCancelBtn');
+  const confirmModal = document.getElementById('confirmModal');
+  const confirmModalContent = confirmModal ? confirmModal.querySelector('.confirm-modal-content') : null;
+  const confirmModalTitle = document.getElementById('confirmModalTitle');
+  const confirmModalMessage = document.getElementById('confirmModalMessage');
+  const confirmModalHint = document.getElementById('confirmModalHint');
+  const confirmOkBtn = document.getElementById('confirmOkBtn');
+  const confirmCancelBtn = document.getElementById('confirmCancelBtn');
 
   const importFileInput = document.getElementById('importFileInput');
 
@@ -70,16 +77,69 @@ document.addEventListener('DOMContentLoaded', function () {
   let frequentCustomUrls = {}; // 用户自定义的常用卡片 URL
   let currentFrequentItems = []; // 当前显示的 frequent 列表引用
   let hiddenRecentUrls = []; // 被用户移除的最近访问URL
-  const bookmarkTreeCache = {
+  let brokenLinkScanSession = null; // 死链扫描任务会话（用于取消）
+  let confirmResolver = null; // 自定义确认弹窗 Promise 解析器
+  let confirmKeydownHandler = null; // 自定义确认弹窗键盘事件
+  const modules = window.JadeModules || {};
+  const bookmarkService = modules.bookmarkService || null;
+  const dashboardModule = modules.dashboard || null;
+  const contextMenuModule = modules.contextMenu || null;
+  const toolsModule = modules.tools || null;
+  const bookmarkTreeCacheManager = bookmarkService && bookmarkService.createTreeCache
+    ? bookmarkService.createTreeCache(chrome)
+    : null;
+  const bookmarkTreeCacheFallback = {
     data: null,
     inFlight: null
   };
+  const DEAD_LINK_CACHE_KEY = 'dead_link_probe_cache_v1';
+  const DEAD_LINK_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
+  const DEAD_LINK_CACHE_MAX_ENTRIES = 4000;
+  let deadLinkProbeCache = {};
+  let deadLinkCachePersistTimer = null;
+
+  function pruneDeadLinkProbeCache() {
+    const now = Date.now();
+    const entries = Object.entries(deadLinkProbeCache || {}).filter(([, entry]) => {
+      if (!entry || typeof entry !== 'object') return false;
+      const checkedAt = Number(entry.checkedAt || 0);
+      if (!checkedAt || (now - checkedAt) > DEAD_LINK_CACHE_TTL_MS) return false;
+      const probe = entry.probe;
+      return !!(probe && typeof probe === 'object' && typeof probe.state === 'string');
+    });
+
+    entries.sort((a, b) => Number(b[1].checkedAt || 0) - Number(a[1].checkedAt || 0));
+    deadLinkProbeCache = Object.fromEntries(entries.slice(0, DEAD_LINK_CACHE_MAX_ENTRIES));
+  }
+
+  function persistDeadLinkProbeCache() {
+    pruneDeadLinkProbeCache();
+    chrome.storage.local.set({ [DEAD_LINK_CACHE_KEY]: deadLinkProbeCache });
+  }
+
+  function schedulePersistDeadLinkProbeCache(delayMs = 200) {
+    if (deadLinkCachePersistTimer) {
+      clearTimeout(deadLinkCachePersistTimer);
+    }
+    deadLinkCachePersistTimer = setTimeout(() => {
+      deadLinkCachePersistTimer = null;
+      persistDeadLinkProbeCache();
+    }, delayMs);
+  }
 
   function invalidateBookmarkTreeCache() {
-    bookmarkTreeCache.data = null;
+    if (bookmarkTreeCacheManager) {
+      bookmarkTreeCacheManager.invalidate();
+      return;
+    }
+    bookmarkTreeCacheFallback.data = null;
   }
 
   function setupBookmarkCacheInvalidation() {
+    if (bookmarkTreeCacheManager) {
+      bookmarkTreeCacheManager.setupInvalidation();
+      return;
+    }
     const invalidate = () => invalidateBookmarkTreeCache();
     const events = [
       chrome.bookmarks.onCreated,
@@ -99,6 +159,10 @@ document.addEventListener('DOMContentLoaded', function () {
   }
 
   function getBookmarkTreeCached(callback, options = {}) {
+    if (bookmarkTreeCacheManager) {
+      bookmarkTreeCacheManager.getTreeCached(callback, options);
+      return;
+    }
     const { forceRefresh = false } = options;
     const runCallback = (tree) => {
       if (typeof callback === 'function') {
@@ -106,13 +170,13 @@ document.addEventListener('DOMContentLoaded', function () {
       }
     };
 
-    if (!forceRefresh && bookmarkTreeCache.data) {
-      runCallback(bookmarkTreeCache.data);
+    if (!forceRefresh && bookmarkTreeCacheFallback.data) {
+      runCallback(bookmarkTreeCacheFallback.data);
       return;
     }
 
-    if (!forceRefresh && bookmarkTreeCache.inFlight) {
-      bookmarkTreeCache.inFlight.then(runCallback);
+    if (!forceRefresh && bookmarkTreeCacheFallback.inFlight) {
+      bookmarkTreeCacheFallback.inFlight.then(runCallback);
       return;
     }
 
@@ -123,14 +187,14 @@ document.addEventListener('DOMContentLoaded', function () {
           resolve([]);
           return;
         }
-        bookmarkTreeCache.data = tree;
+        bookmarkTreeCacheFallback.data = tree;
         resolve(tree);
       });
     });
 
-    bookmarkTreeCache.inFlight = request.finally(() => {
-      if (bookmarkTreeCache.inFlight === request) {
-        bookmarkTreeCache.inFlight = null;
+    bookmarkTreeCacheFallback.inFlight = request.finally(() => {
+      if (bookmarkTreeCacheFallback.inFlight === request) {
+        bookmarkTreeCacheFallback.inFlight = null;
       }
     });
 
@@ -154,6 +218,7 @@ document.addEventListener('DOMContentLoaded', function () {
       isSidePanel = window.innerHeight > 600;
     }
   }
+  document.documentElement.setAttribute('data-layout', isSidePanel ? 'sidepanel' : 'popup');
 
   // 检测操作系统以显示快捷键提示
   const isMac = navigator.platform.toUpperCase().indexOf('MAC') >= 0;
@@ -168,7 +233,9 @@ document.addEventListener('DOMContentLoaded', function () {
     setupBookmarkCacheInvalidation();
 
     // 载入置顶、黑名单、排序和自定义标题，然后构建首页
-    chrome.storage.local.get(['pinned_bookmarks', 'frequent_order', 'frequent_custom_titles', 'frequent_custom_urls', 'hidden_recent_urls'], (res) => {
+    chrome.storage.local.get(
+      ['pinned_bookmarks', 'frequent_order', 'frequent_custom_titles', 'frequent_custom_urls', 'hidden_recent_urls', DEAD_LINK_CACHE_KEY],
+      (res) => {
       if (res.pinned_bookmarks) {
         pinnedIds = new Set(res.pinned_bookmarks);
       }
@@ -184,6 +251,11 @@ document.addEventListener('DOMContentLoaded', function () {
       if (res.hidden_recent_urls) {
         hiddenRecentUrls = res.hidden_recent_urls;
       }
+      if (res[DEAD_LINK_CACHE_KEY] && typeof res[DEAD_LINK_CACHE_KEY] === 'object') {
+        deadLinkProbeCache = res[DEAD_LINK_CACHE_KEY];
+        pruneDeadLinkProbeCache();
+        schedulePersistDeadLinkProbeCache(800);
+      }
 
       chrome.bookmarks.get('1', (nodes) => {
         if (nodes && nodes.length > 0) {
@@ -193,7 +265,8 @@ document.addEventListener('DOMContentLoaded', function () {
           buildDashboard();
         }
       });
-    });
+      }
+    );
 
     setupGlobalListeners();
   }
@@ -248,6 +321,7 @@ document.addEventListener('DOMContentLoaded', function () {
 
     if (toolsCloseBtn) {
       toolsCloseBtn.addEventListener('click', () => {
+        cancelBrokenLinkScanSilently();
         toolsModal.style.display = 'none';
       });
     }
@@ -290,7 +364,7 @@ document.addEventListener('DOMContentLoaded', function () {
 
       if (currentFrequentItems.length === 0) {
         frequentGrid.innerHTML = `
-          <div class="empty-pinned-state" style="grid-column: span 4;">
+          <div class="empty-pinned-state empty-pinned-span-full">
             <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
               <path d="M16 12V4h1V2H7v2h1v8l-2 2v2h5.2v6h1.6v-6H18v-2l-2-2z"/>
             </svg>
@@ -321,7 +395,7 @@ document.addEventListener('DOMContentLoaded', function () {
         if (shortName.length > 10) shortName = shortName.substring(0, 10) + '..';
 
         const iconHtml = isFolder
-          ? `<svg viewBox="0 0 24 24" fill="currentColor" width="24" height="24" style="color:var(--text-tertiary)">
+          ? `<svg class="icon-muted" viewBox="0 0 24 24" fill="currentColor" width="24" height="24">
                <path d="M10 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2h-8l-2-2z"/>
              </svg>`
           : `<img src="chrome-extension://${chrome.runtime.id}/_favicon/?pageUrl=${encodeURIComponent(item.url)}&size=128"
@@ -329,7 +403,7 @@ document.addEventListener('DOMContentLoaded', function () {
 
         a.innerHTML = `
               <div class="frequent-actions" title="取消置顶">
-                  <svg width="12" height="12" viewBox="0 0 24 24" fill="var(--accent-color)" stroke="var(--accent-color)" stroke-width="2.5" style="opacity: 0; transform: rotate(45deg); transition: opacity 0.25s ease, fill 0.25s ease;"><path d="M16 12V4h1V2H7v2h1v8l-2 2v2h5.2v6h1.6v-6H18v-2l-2-2z"/></svg>
+                  <svg class="pin-indicator-icon" width="12" height="12" viewBox="0 0 24 24" fill="var(--accent-color)" stroke="var(--accent-color)" stroke-width="2.5"><path d="M16 12V4h1V2H7v2h1v8l-2 2v2h5.2v6h1.6v-6H18v-2l-2-2z"/></svg>
               </div>
               <div class="frequent-icon-wrap">
                   ${iconHtml}
@@ -524,7 +598,7 @@ document.addEventListener('DOMContentLoaded', function () {
         recentSection.style.display = 'block';
         if (combined.length === 0) {
           recentListView.innerHTML = `
-            <div class="empty-state" style="padding: 16px; color: var(--text-tertiary); text-align: center; border-radius: 8px; background: var(--bg-hover);">
+            <div class="empty-state">
               暂无最近访问记录
             </div>
           `;
@@ -679,6 +753,9 @@ document.addEventListener('DOMContentLoaded', function () {
   }
 
   function getTimeAgo(timestamp) {
+    if (dashboardModule && typeof dashboardModule.getTimeAgo === 'function') {
+      return dashboardModule.getTimeAgo(timestamp);
+    }
     if (!timestamp) return '未知时间';
     let ts = timestamp;
     if (ts < 10000000000) ts *= 1000;
@@ -781,7 +858,7 @@ document.addEventListener('DOMContentLoaded', function () {
     }
 
     const backBtn = document.createElement('span');
-    backBtn.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align: middle; margin-right: 2px;"><polyline points="15 18 9 12 15 6"></polyline></svg> 返回`;
+    backBtn.innerHTML = `<svg class="inline-back-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="15 18 9 12 15 6"></polyline></svg> 返回`;
 
     // 允许拖放到“返回”按钮上 (移动到上一级)
     const parentNode = navigationStack.length > 1 ? navigationStack[navigationStack.length - 2] : null; // 上一级目录 (或 undefined 当返回首页时不支持)
@@ -931,7 +1008,7 @@ document.addEventListener('DOMContentLoaded', function () {
 
       const iconHtml = isFolder
         ? `<div class="bookmark-icon">
-            <svg viewBox="0 0 24 24" fill="currentColor" width="16" height="16" style="color:var(--text-tertiary)">
+            <svg class="icon-muted" viewBox="0 0 24 24" fill="currentColor" width="16" height="16">
               <path d="M10 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2h-8l-2-2z"/>
             </svg>
            </div>`
@@ -945,12 +1022,12 @@ document.addEventListener('DOMContentLoaded', function () {
         ? highlightText(displayTitle, searchInput.value.trim())
         : escapeHtml(displayTitle);
 
-      const metaSpan = item.meta ? `<span class="recent-meta" style="margin-left: 8px;">${item.meta}</span>` : '';
+      const metaSpan = item.meta ? `<span class="recent-meta">${item.meta}</span>` : '';
 
       a.innerHTML = `
         ${iconHtml}
-        <div class="bookmark-info" style="flex-direction:row; align-items:center;">
-          <span class="bookmark-title" style="${isFolder ? 'font-weight:500;' : ''}">${titleHtml}</span>
+        <div class="bookmark-info">
+          <span class="bookmark-title ${isFolder ? 'bookmark-title-folder' : ''}">${titleHtml}</span>
           ${metaSpan}
         </div>
       `;
@@ -1099,6 +1176,109 @@ document.addEventListener('DOMContentLoaded', function () {
     }, { once: true });
   }
 
+  function resolveConfirmModal(result) {
+    if (confirmModal) confirmModal.style.display = 'none';
+    if (confirmKeydownHandler) {
+      document.removeEventListener('keydown', confirmKeydownHandler);
+      confirmKeydownHandler = null;
+    }
+    if (!confirmResolver) return;
+    const resolver = confirmResolver;
+    confirmResolver = null;
+    resolver(result);
+  }
+
+  function confirmDangerAction(message, options = {}) {
+    const {
+      title = '确认危险操作',
+      hint = '此操作不可撤销，是否继续？',
+      okText = '继续',
+      variant = 'danger'
+    } = options;
+
+    if (!confirmModal || !confirmOkBtn || !confirmCancelBtn || !confirmModalMessage) {
+      return Promise.resolve(confirm(`⚠️ ${message}\n\n${hint}`));
+    }
+
+    if (confirmResolver) {
+      resolveConfirmModal(false);
+    }
+
+    if (confirmModalTitle) confirmModalTitle.textContent = title;
+    confirmModalMessage.textContent = message;
+    if (confirmModalHint) confirmModalHint.textContent = hint;
+    confirmOkBtn.textContent = okText;
+    if (confirmModalContent) {
+      confirmModalContent.classList.remove('confirm-normal', 'confirm-danger');
+      confirmModalContent.classList.add(variant === 'normal' ? 'confirm-normal' : 'confirm-danger');
+    }
+    confirmOkBtn.classList.remove('confirm-ok-danger', 'confirm-ok-normal');
+    confirmOkBtn.classList.add(variant === 'normal' ? 'confirm-ok-normal' : 'confirm-ok-danger');
+
+    confirmModal.style.display = 'flex';
+    confirmCancelBtn.focus();
+
+    confirmOkBtn.onclick = () => resolveConfirmModal(true);
+    confirmCancelBtn.onclick = () => resolveConfirmModal(false);
+    confirmModal.onclick = (e) => {
+      if (e.target === confirmModal) {
+        resolveConfirmModal(false);
+      }
+    };
+
+    confirmKeydownHandler = (e) => {
+      if (!confirmModal || confirmModal.style.display !== 'flex') return;
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        resolveConfirmModal(false);
+      } else if (e.key === 'Enter') {
+        e.preventDefault();
+        resolveConfirmModal(true);
+      }
+    };
+    document.addEventListener('keydown', confirmKeydownHandler);
+
+    return new Promise((resolve) => {
+      confirmResolver = resolve;
+    });
+  }
+
+  function cancelBrokenLinkScanSilently() {
+    if (!brokenLinkScanSession || brokenLinkScanSession.cancelled) return;
+    if (toolsModule && toolsModule.cancelScan) {
+      toolsModule.cancelScan(brokenLinkScanSession);
+    } else {
+      brokenLinkScanSession.cancelled = true;
+      brokenLinkScanSession.controllers.forEach(controller => controller.abort());
+      brokenLinkScanSession.controllers.clear();
+    }
+    brokenLinkScanSession = null;
+  }
+
+  function getBrokenProbeReasonLabel(probe) {
+    if (!probe) return '未知原因';
+    if (probe.reason === 'http_404') return 'HTTP 404（页面不存在）';
+    if (probe.reason === 'http_410') return 'HTTP 410（资源已删除）';
+    if (probe.reason === 'http_451') return 'HTTP 451（受法律限制）';
+    if (probe.reason === 'network_failure') return '网络连接失败';
+    if (probe.reason === 'timeout') return '请求超时';
+    if (probe.reason === 'head_blocked') return 'HEAD 请求受限';
+    if (probe.reason === 'head_inconclusive') return 'HEAD 返回非确定状态';
+    if (probe.reason === 'opaque_get') return '仅 no-cors 可访问（待复核）';
+    if (probe.reason && probe.reason.startsWith('http_')) return `HTTP ${probe.reason.replace('http_', '')}`;
+    return probe.reason || '未知原因';
+  }
+
+  function setToolDetailStatusText(text, tone = 'muted', strong = false) {
+    const classes = ['tool-status-text', `tool-status-${tone}`];
+    if (strong) classes.push('tool-status-strong');
+    toolDetailStatus.innerHTML = `<span class="${classes.join(' ')}">${escapeHtml(String(text || ''))}</span>`;
+  }
+
+  function setToolsResultMessage(message, tone = 'muted') {
+    toolsResultList.innerHTML = `<div class="tool-result-message tool-result-${tone}">${escapeHtml(String(message || ''))}</div>`;
+  }
+
   let undoTimeout = null;
   function showToast(msg, undoCallback = null) {
     const toast = document.getElementById('toast');
@@ -1151,38 +1331,52 @@ document.addEventListener('DOMContentLoaded', function () {
 
   // --- 右键菜单与模态框处理 ---
   function showContextMenu(e, isFolder, isFrequent = false, isRecent = false) {
-    const activeId = targetNodeId || targetNodeDomain;
+    const visibility = contextMenuModule && contextMenuModule.resolveVisibility
+      ? contextMenuModule.resolveVisibility({
+        isFolder,
+        isFrequent,
+        isRecent,
+        targetNodeId,
+        targetNodeDomain,
+        pinnedIds
+      })
+      : {
+        showPin: !isRecent,
+        pinText: pinnedIds.has(targetNodeId || targetNodeDomain) ? '从我的置顶移除' : '添加到我的置顶',
+        showSortName: isFolder && !isRecent,
+        showSortTime: isFolder && !isRecent,
+        showEdit: (targetNodeId || isFrequent) && !isRecent,
+        showDelete: !!(targetNodeId && !isRecent),
+        showAddToGroup: isRecent,
+        showRemoveRecent: isRecent,
+        showDivider: !isRecent
+      };
 
     if (menuPin) {
-      if (isRecent) {
-        menuPin.style.display = 'none';
-      } else {
-        menuPin.style.display = 'block';
-        menuPin.textContent = pinnedIds.has(activeId) ? '从我的置顶移除' : '添加到我的置顶';
-      }
+      menuPin.style.display = visibility.showPin ? 'block' : 'none';
+      menuPin.textContent = visibility.pinText;
     }
+    if (menuSortName) menuSortName.style.display = visibility.showSortName ? 'block' : 'none';
+    if (menuSortTime) menuSortTime.style.display = visibility.showSortTime ? 'block' : 'none';
+    if (menuEdit) menuEdit.style.display = visibility.showEdit ? 'block' : 'none';
+    if (menuDelete) menuDelete.style.display = visibility.showDelete ? 'block' : 'none';
+    if (menuAddToGroup) menuAddToGroup.style.display = visibility.showAddToGroup ? 'block' : 'none';
+    if (menuRemoveRecent) menuRemoveRecent.style.display = visibility.showRemoveRecent ? 'block' : 'none';
+    if (menuDivider1) menuDivider1.style.display = visibility.showDivider ? 'block' : 'none';
 
-    if (menuSortName) menuSortName.style.display = isFolder && !isRecent ? 'block' : 'none';
-    if (menuSortTime) menuSortTime.style.display = isFolder && !isRecent ? 'block' : 'none';
+    const pos = contextMenuModule && contextMenuModule.resolvePosition
+      ? contextMenuModule.resolvePosition({
+        clientX: e.clientX,
+        clientY: e.clientY,
+        bodyWidth: document.body.clientWidth,
+        bodyHeight: document.body.clientHeight,
+        isFolder,
+        isFrequent
+      })
+      : { x: e.clientX, y: e.clientY };
 
-    // 常用访问卡片或普通书签：编辑显示。最近访问：不显示
-    if (menuEdit) menuEdit.style.display = ((targetNodeId || isFrequent) && !isRecent) ? 'block' : 'none';
-    if (menuDelete) menuDelete.style.display = (targetNodeId && !isRecent) ? 'block' : 'none';
-
-    if (menuAddToGroup) menuAddToGroup.style.display = isRecent ? 'block' : 'none';
-    if (menuRemoveRecent) menuRemoveRecent.style.display = isRecent ? 'block' : 'none';
-    if (menuDivider1) menuDivider1.style.display = isRecent ? 'none' : 'block';
-
-    let x = e.clientX;
-    let y = e.clientY;
-    const menuWidth = 140;
-    const menuHeight = isFolder ? 160 : (isFrequent ? 120 : 100);
-
-    if (x + menuWidth > document.body.clientWidth) x -= menuWidth;
-    if (y + menuHeight > document.body.clientHeight) y -= menuHeight;
-
-    contextMenu.style.left = `${x}px`;
-    contextMenu.style.top = `${y}px`;
+    contextMenu.style.left = `${pos.x}px`;
+    contextMenu.style.top = `${pos.y}px`;
     contextMenu.style.display = 'block';
   }
 
@@ -1273,8 +1467,12 @@ document.addEventListener('DOMContentLoaded', function () {
       }
     });
 
-    menuDelete.addEventListener('click', () => {
+    menuDelete.addEventListener('click', async () => {
       if (!targetNodeId) return;
+      const confirmMessage = targetNodeIsFolder
+        ? '确定删除该文件夹及其所有子项吗？'
+        : '确定删除该书签吗？';
+      if (!(await confirmDangerAction(confirmMessage, { okText: '删除' }))) return;
       if (targetNodeIsFolder) {
         chrome.bookmarks.removeTree(targetNodeId, refreshView);
       } else {
@@ -1368,6 +1566,7 @@ document.addEventListener('DOMContentLoaded', function () {
   }
 
   function closeToolView() {
+    cancelBrokenLinkScanSilently();
     toolsDetailView.classList.remove('active');
     toolsMenuView.classList.add('active');
     toolsDetailView.style.display = 'none';
@@ -1386,11 +1585,11 @@ document.addEventListener('DOMContentLoaded', function () {
       btnImportBookmarksNew.addEventListener('click', () => {
         openToolView('导入书签');
         toolDetailStatus.style.display = 'flex';
-        toolDetailStatus.innerHTML = '<span style="color:var(--text-secondary)">状态：等待选择文件</span>';
+        setToolDetailStatusText('状态：等待选择文件');
 
         toolDetailMainAction.innerHTML = `<button id="btnSelectImportFile" class="tool-btn tool-btn-primary">选择文件</button>`;
         toolDetailWarning.style.display = 'block';
-        toolDetailWarning.innerHTML = '⚠️ 导入的书签将合并到当前系统中。由于未完全适配所有格式，当前仅支持特定 JSON 格式，导入过程可能导致意外错误。';
+        toolDetailWarning.innerHTML = '⚠️ 导入会在“其他书签”下创建新文件夹并写入内容。支持标准 HTML 书签文件（Netscape 格式），导入后可手动整理。';
 
         document.getElementById('btnSelectImportFile').addEventListener('click', () => {
           importFileInput.click();
@@ -1403,7 +1602,7 @@ document.addEventListener('DOMContentLoaded', function () {
       btnExportBookmarksNew.addEventListener('click', () => {
         openToolView('导出书签');
         toolDetailStatus.style.display = 'flex';
-        toolDetailStatus.innerHTML = '<span style="color:var(--text-secondary)">状态：准备导出</span>';
+        setToolDetailStatusText('状态：准备导出');
 
         toolDetailMainAction.innerHTML = `<button id="btnExecuteExport" class="tool-btn tool-btn-primary">立即导出</button>`;
         toolDetailWarning.style.display = 'block';
@@ -1413,7 +1612,7 @@ document.addEventListener('DOMContentLoaded', function () {
           e.target.className = 'tool-btn tool-btn-primary';
           e.target.disabled = true;
           e.target.textContent = '处理中...';
-          toolDetailStatus.innerHTML = '<span style="color:var(--text-secondary)">状态：正在生成...</span>';
+          setToolDetailStatusText('状态：正在生成...');
           handleExportBookmarks(e.target);
         });
       });
@@ -1424,7 +1623,7 @@ document.addEventListener('DOMContentLoaded', function () {
       btnFindDuplicates.addEventListener('click', () => {
         openToolView('扫描重复');
         toolDetailStatus.style.display = 'flex';
-        toolDetailStatus.innerHTML = '<span style="color:var(--text-secondary)">状态：尚未扫描</span>';
+        setToolDetailStatusText('状态：尚未扫描');
 
         toolDetailMainAction.innerHTML = `<button id="btnStartFindDuplicates" class="tool-btn tool-btn-primary">开始扫描</button>`;
         toolDetailWarning.style.display = 'block';
@@ -1436,8 +1635,8 @@ document.addEventListener('DOMContentLoaded', function () {
           btn.disabled = true;
           btn.textContent = '处理中...';
           toolDetailStatus.style.display = 'flex';
-          toolDetailStatus.innerHTML = '<span style="color:var(--text-secondary)">运行中：正在扫描整个书签库...</span>';
-          toolsResultList.innerHTML = '<div style="color:var(--text-tertiary); padding:16px; text-align:center;">处理中...</div>';
+          setToolDetailStatusText('运行中：正在扫描整个书签库...');
+          setToolsResultMessage('处理中...');
 
           getBookmarkTreeCached((tree) => {
             const urlMap = new Map();
@@ -1461,8 +1660,8 @@ document.addEventListener('DOMContentLoaded', function () {
             });
 
             if (duplicateGroups.length === 0) {
-              toolDetailStatus.innerHTML = '<span style="color:#34c759">扫描完成：未发现任何重复的书签。</span>';
-              toolsResultList.innerHTML = '<div style="text-align:center; padding: 20px;">🎉 您的书签库非常整洁！</div>';
+              setToolDetailStatusText('扫描完成：未发现任何重复的书签。', 'success');
+              setToolsResultMessage('🎉 您的书签库非常整洁！');
               document.getElementById('statusDuplicates').textContent = '上次扫描：0 项重复';
               btn.disabled = false;
               btn.textContent = '重新扫描';
@@ -1470,18 +1669,18 @@ document.addEventListener('DOMContentLoaded', function () {
               return;
             }
 
-            toolDetailStatus.innerHTML = `<span style="color:#d97706; font-weight:bold;">扫描完成：共发现 ${duplicateGroups.length} 组重复链接。</span>`;
+            setToolDetailStatusText(`扫描完成：共发现 ${duplicateGroups.length} 组重复链接。`, 'warning', true);
             document.getElementById('statusDuplicates').textContent = `上次扫描：${duplicateGroups.length} 组重复`;
 
             let html = '';
             duplicateGroups.forEach(group => {
-              html += `<div style="margin-bottom: 12px; border:1px solid var(--border-color); padding: 8px; border-radius: 6px; background: var(--bg-surface);">
-                                    <div style="font-size:11px; margin-bottom: 8px; word-break: break-all; color: var(--text-tertiary);">${escapeHtml(group.url)}</div>`;
+              html += `<div class="tool-check-group">
+                                    <div class="tool-check-url">${escapeHtml(group.url)}</div>`;
               group.nodes.forEach((node, nIdx) => {
                 const shouldCheck = nIdx > 0;
-                html += `<div style="display:flex; align-items:center; margin-bottom:6px; gap:8px;">
+                html += `<div class="tool-check-item">
                                         <input type="checkbox" class="duplicate-checkbox" data-id="${node.id}" ${shouldCheck ? 'checked' : ''}>
-                                        <span style="flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:13px;" title="${escapeHtml(node.title)}">${escapeHtml(node.title || '无标题')}</span>
+                                        <span class="tool-check-label" title="${escapeHtml(node.title)}">${escapeHtml(node.title || '无标题')}</span>
                                        </div>`;
               });
               html += `</div>`;
@@ -1494,13 +1693,14 @@ document.addEventListener('DOMContentLoaded', function () {
             btn.textContent = '重新扫描';
             btn.className = 'tool-btn tool-btn-secondary';
 
-            document.getElementById('btnCleanDuplicates').addEventListener('click', (eClean) => {
+            document.getElementById('btnCleanDuplicates').addEventListener('click', async (eClean) => {
               const checkboxes = toolsResultList.querySelectorAll('.duplicate-checkbox:checked');
               if (checkboxes.length === 0) return;
+              if (!(await confirmDangerAction(`确定删除选中的 ${checkboxes.length} 个重复书签吗？`, { okText: '删除' }))) return;
               eClean.target.className = 'tool-btn tool-btn-danger';
               eClean.target.disabled = true;
               eClean.target.textContent = '清理中...';
-              toolDetailStatus.innerHTML = '<span style="color:var(--text-secondary)">处理中：正在移除选中项...</span>';
+              setToolDetailStatusText('处理中：正在移除选中项...');
               let promises = Array.from(checkboxes).map(cb => {
                 return new Promise(res => chrome.bookmarks.remove(cb.getAttribute('data-id'), res));
               });
@@ -1519,7 +1719,7 @@ document.addEventListener('DOMContentLoaded', function () {
       btnBookmarkStats.addEventListener('click', () => {
         openToolView('书签统计');
         toolDetailStatus.style.display = 'flex';
-        toolDetailStatus.innerHTML = '<span style="color:var(--text-secondary)">状态：尚未分析</span>';
+        setToolDetailStatusText('状态：尚未分析');
 
         toolDetailMainAction.innerHTML = `<button id="btnStartStats" class="tool-btn tool-btn-primary">开始分析</button>`;
         toolDetailWarning.style.display = 'block';
@@ -1530,7 +1730,7 @@ document.addEventListener('DOMContentLoaded', function () {
           btn.className = 'tool-btn tool-btn-primary';
           btn.disabled = true;
           btn.textContent = '处理中...';
-          toolDetailStatus.innerHTML = '<span style="color:var(--text-secondary)">运行中：正在收集数据...</span>';
+          setToolDetailStatusText('运行中：正在收集数据...');
 
           getBookmarkTreeCached((tree) => {
             let totalBookmarks = 0;
@@ -1586,68 +1786,68 @@ document.addEventListener('DOMContentLoaded', function () {
             sortedDomains.forEach(([domain, count], idx) => {
               const pct = Math.round((count / topCount) * 100);
               domainHtml += `
-                <div style="display:flex; align-items:center; gap:8px; font-size:12px; height:26px;">
-                  <span style="width:18px; text-align:right; color:var(--text-tertiary); flex-shrink:0;">${idx + 1}</span>
-                  <div style="flex:1; min-width:0; display:flex; align-items:center; gap:8px;">
-                    <span style="white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:160px; color:var(--text-primary);">${escapeHtml(domain)}</span>
-                    <div style="flex:1; height:4px; background:var(--bg-hover); border-radius:2px; overflow:hidden;">
-                      <div style="width:${pct}%; height:100%; background:var(--accent-color); border-radius:2px;"></div>
+                <div class="stats-domain-row">
+                  <span class="stats-domain-rank">${idx + 1}</span>
+                  <div class="stats-domain-main">
+                    <span class="stats-domain-name">${escapeHtml(domain)}</span>
+                    <div class="stats-domain-bar">
+                      <div class="stats-domain-fill" data-fill="${pct}"></div>
                     </div>
                   </div>
-                  <span style="color:var(--text-tertiary); flex-shrink:0;">${count}</span>
+                  <span class="stats-domain-count">${count}</span>
                 </div>`;
             });
 
-            // 结构健康度
-            const healthColor = (duplicateCount + emptyFolders) === 0 ? '#34c759' : '#d97706';
-            const healthIcon = (duplicateCount + emptyFolders) === 0 ? '✅' : '⚠️';
-
-            toolDetailStatus.innerHTML = '<span style="color:#34c759">分析完成</span>';
+            setToolDetailStatusText('分析完成', 'success');
             toolsResultList.innerHTML = `
-              <div style="display:grid; grid-template-columns:1fr 1fr; gap:8px; margin-bottom:16px;">
-                <div style="background:var(--bg-base); border-radius:8px; padding:14px 8px; text-align:center; border:1px solid var(--border-color);">
-                  <div style="font-size:28px; font-weight:600; color:var(--text-primary);">${totalBookmarks}</div>
-                  <div style="font-size:11px; color:var(--text-tertiary); margin-top:4px;">书签总数</div>
+              <div class="stats-card-grid stats-card-grid-tight">
+                <div class="stat-card stat-card-compact">
+                  <div class="stat-value stat-value-medium">${totalBookmarks}</div>
+                  <div class="stat-label">书签总数</div>
                 </div>
-                <div style="background:var(--bg-base); border-radius:8px; padding:14px 8px; text-align:center; border:1px solid var(--border-color);">
-                  <div style="font-size:28px; font-weight:600; color:var(--text-primary);">${totalFolders}</div>
-                  <div style="font-size:11px; color:var(--text-tertiary); margin-top:4px;">文件夹总数</div>
+                <div class="stat-card stat-card-compact">
+                  <div class="stat-value stat-value-medium">${totalFolders}</div>
+                  <div class="stat-label">文件夹总数</div>
                 </div>
-                <div style="background:var(--bg-base); border-radius:8px; padding:14px 8px; text-align:center; border:1px solid var(--border-color);">
-                  <div style="font-size:28px; font-weight:600; color:var(--text-primary);">${maxDepth}</div>
-                  <div style="font-size:11px; color:var(--text-tertiary); margin-top:4px;">最深层级</div>
+                <div class="stat-card stat-card-compact">
+                  <div class="stat-value stat-value-medium">${maxDepth}</div>
+                  <div class="stat-label">最深层级</div>
                 </div>
-                <div style="background:var(--bg-base); border-radius:8px; padding:14px 8px; text-align:center; border:1px solid var(--border-color);">
-                  <div style="font-size:28px; font-weight:600; color:${emptyFolders > 0 ? '#d97706' : 'var(--text-primary)'};">${emptyFolders}</div>
-                  <div style="font-size:11px; color:var(--text-tertiary); margin-top:4px;">空文件夹</div>
-                </div>
-              </div>
-
-              <div style="margin-bottom:16px;">
-                <div style="font-size:12px; font-weight:500; color:var(--text-secondary); margin-bottom:10px; letter-spacing:0.2px;">域名分布 Top 10</div>
-                <div style="background:var(--bg-base); border-radius:8px; padding:12px 14px; border:1px solid var(--border-color); display:flex; flex-direction:column; gap:6px;">
-                  ${domainHtml || '<div style="font-size:12px; color:var(--text-tertiary); text-align:center; padding:8px;">暂无数据</div>'}
+                <div class="stat-card stat-card-compact">
+                  <div class="stat-value stat-value-medium ${emptyFolders > 0 ? 'stat-value-warning' : ''}">${emptyFolders}</div>
+                  <div class="stat-label">空文件夹</div>
                 </div>
               </div>
 
-              <div>
-                <div style="font-size:12px; font-weight:500; color:var(--text-secondary); margin-bottom:10px; letter-spacing:0.2px;">结构健康度</div>
-                <div style="background:var(--bg-base); border-radius:8px; padding:12px 14px; border:1px solid var(--border-color); display:flex; flex-direction:column; gap:10px;">
-                  <div style="display:flex; justify-content:space-between; align-items:center; font-size:13px;">
-                    <span style="color:var(--text-secondary);">重复链接</span>
-                    <span style="font-weight:500; color:${duplicateCount > 0 ? '#d97706' : '#34c759'};">${duplicateCount > 0 ? duplicateCount + ' 组' : '无'}</span>
+              <div class="stats-section">
+                <div class="stats-section-title">域名分布 Top 10</div>
+                <div class="stats-section-panel stats-domain-list">
+                  ${domainHtml || '<div class="stats-empty">暂无数据</div>'}
+                </div>
+              </div>
+
+              <div class="stats-section">
+                <div class="stats-section-title">结构健康度</div>
+                <div class="stats-section-panel stats-health-list">
+                  <div class="stats-health-row">
+                    <span class="stats-health-label">重复链接</span>
+                    <span class="stats-health-value ${duplicateCount > 0 ? 'stats-health-warning' : 'stats-health-good'}">${duplicateCount > 0 ? `${duplicateCount} 组` : '无'}</span>
                   </div>
-                  <div style="display:flex; justify-content:space-between; align-items:center; font-size:13px;">
-                    <span style="color:var(--text-secondary);">空文件夹</span>
-                    <span style="font-weight:500; color:${emptyFolders > 0 ? '#d97706' : '#34c759'};">${emptyFolders > 0 ? emptyFolders + ' 个' : '无'}</span>
+                  <div class="stats-health-row">
+                    <span class="stats-health-label">空文件夹</span>
+                    <span class="stats-health-value ${emptyFolders > 0 ? 'stats-health-warning' : 'stats-health-good'}">${emptyFolders > 0 ? `${emptyFolders} 个` : '无'}</span>
                   </div>
-                  <div style="display:flex; justify-content:space-between; align-items:center; font-size:13px;">
-                    <span style="color:var(--text-secondary);">最大文件夹</span>
-                    <span style="font-weight:500; color:var(--text-primary);">${escapeHtml(largestFolder.title)}（${largestFolder.count} 项）</span>
+                  <div class="stats-health-row">
+                    <span class="stats-health-label">最大文件夹</span>
+                    <span class="stats-health-value stats-health-primary">${escapeHtml(largestFolder.title)}（${largestFolder.count} 项）</span>
                   </div>
                 </div>
               </div>
             `;
+            toolsResultList.querySelectorAll('.stats-domain-fill').forEach((el) => {
+              const pct = Math.max(0, Math.min(100, Number(el.dataset.fill || 0)));
+              el.style.width = `${pct}%`;
+            });
             document.getElementById('statusStats').textContent = `共 ${totalBookmarks} 个书签`;
             btn.disabled = false;
             btn.textContent = '重新分析';
@@ -1660,10 +1860,10 @@ document.addEventListener('DOMContentLoaded', function () {
       btnFindBrokenLinks.addEventListener('click', () => {
         openToolView('检查失效链接');
         toolDetailStatus.style.display = 'flex';
-        toolDetailStatus.innerHTML = '<span style="color:var(--text-secondary)">状态：尚未扫描</span>';
+        setToolDetailStatusText('状态：尚未扫描');
         toolDetailMainAction.innerHTML = `<button id="btnStartCheckBroken" class="tool-btn tool-btn-primary">开始检测</button>`;
         toolDetailWarning.style.display = 'block';
-        toolDetailWarning.innerHTML = '⚠️ 扫描数以千计的书签可能会产生网络开销，请耐心等待。部分网站设置了防爬机制可能产生误判。';
+        toolDetailWarning.innerHTML = '⚠️ 新策略：优先用 HEAD 探测并分级重试；无法高置信判定的条目会标记为“待复核”，避免误删。';
 
         document.getElementById('btnStartCheckBroken').addEventListener('click', async (e) => {
           const btn = e.target;
@@ -1671,104 +1871,167 @@ document.addEventListener('DOMContentLoaded', function () {
           btn.disabled = true;
           btn.textContent = '处理中...';
           toolDetailStatus.style.display = 'flex';
-          toolDetailStatus.innerHTML = '<span style="color:var(--text-secondary)">运行中：正在收集所有链接...</span>';
-          toolsResultList.innerHTML = '<div style="color:var(--text-tertiary); padding:16px; text-align:center;">处理中...</div>';
+          setToolDetailStatusText('运行中：正在收集所有链接...');
+          setToolsResultMessage('处理中...');
+
+          if (!toolsModule || !toolsModule.runBrokenLinkScan || !toolsModule.collectHttpLinks) {
+            setToolDetailStatusText('状态：工具模块未加载，无法执行检测', 'error');
+            setToolsResultMessage('请刷新扩展后重试', 'error');
+            btn.disabled = false;
+            btn.textContent = '重新检测';
+            btn.className = 'tool-btn tool-btn-secondary';
+            return;
+          }
+
+          if (brokenLinkScanSession && !brokenLinkScanSession.cancelled) {
+            if (toolsModule.cancelScan) toolsModule.cancelScan(brokenLinkScanSession);
+            else {
+              brokenLinkScanSession.cancelled = true;
+              brokenLinkScanSession.controllers.forEach(controller => controller.abort());
+              brokenLinkScanSession.controllers.clear();
+            }
+          }
+
+          const scanSession = toolsModule.createScanSession
+            ? toolsModule.createScanSession()
+            : { cancelled: false, controllers: new Set() };
+          brokenLinkScanSession = scanSession;
+
+          const setScanIdle = () => {
+            btn.disabled = false;
+            btn.textContent = '重新检测';
+            btn.className = 'tool-btn tool-btn-secondary';
+          };
 
           getBookmarkTreeCached(async (tree) => {
-            let links = [];
-            function traverse(nodes) {
-              nodes.forEach(node => {
-                if (node.url && (node.url.startsWith('http://') || node.url.startsWith('https://'))) {
-                  links.push(node);
+            const links = toolsModule.collectHttpLinks(tree);
+            let completedCount = 0;
+            const totalCount = links.length;
+
+            if (totalCount === 0) {
+              setToolDetailStatusText('扫描完成：未发现有效 HTTP(S) 链接需要检测。', 'success');
+              toolsResultList.innerHTML = '';
+              toolDetailFooter.style.display = 'none';
+              setScanIdle();
+              if (brokenLinkScanSession === scanSession) brokenLinkScanSession = null;
+              return;
+            }
+
+            setToolDetailStatusText(`运行中：已找到 ${totalCount} 个链接，准备探测。这可能需要一分钟。`);
+            toolsResultList.innerHTML = '';
+            toolDetailFooter.style.display = 'flex';
+            toolDetailFooter.style.justifyContent = 'center';
+            toolDetailFooter.innerHTML = `<button id="btnCancelBrokenScan" class="tool-btn tool-btn-secondary">取消检测</button>`;
+            const cancelBtn = document.getElementById('btnCancelBrokenScan');
+            if (cancelBtn) {
+              cancelBtn.addEventListener('click', () => {
+                if (scanSession.cancelled) return;
+                if (toolsModule.cancelScan) toolsModule.cancelScan(scanSession);
+                else {
+                  scanSession.cancelled = true;
+                  scanSession.controllers.forEach(controller => controller.abort());
+                  scanSession.controllers.clear();
                 }
-                if (node.children) traverse(node.children);
+                setToolDetailStatusText(`检测已取消（${completedCount}/${totalCount}）`, 'warning');
+                setToolsResultMessage('已取消本次检测');
+                toolDetailFooter.style.display = 'none';
+                setScanIdle();
+                if (brokenLinkScanSession === scanSession) brokenLinkScanSession = null;
               });
             }
-            traverse(tree);
 
-            if (links.length === 0) {
-              toolDetailStatus.innerHTML = '<span style="color:#34c759">扫描完成：未发现有效 HTTP(S) 链接需要检测。</span>';
-              toolsResultList.innerHTML = '';
-              btn.disabled = false;
-              btn.textContent = '重新检测';
-              return;
-            }
-
-            toolDetailStatus.innerHTML = `<span style="color:var(--text-secondary)">运行中：已找到 ${links.length} 个链接，准备探测。这可能需要一分钟。</span>`;
-            toolsResultList.innerHTML = '';
-            const brokenLinks = [];
-
-            const concurrencyLimit = 5;
-            let currentIndex = 0;
-            let completedCount = 0;
-
-            async function checkNext() {
-              if (currentIndex >= links.length) return;
-              const idx = currentIndex++;
-              const node = links[idx];
-
-              try {
-                const controller = new AbortController();
-                const timeoutId = setTimeout(() => controller.abort(), 6000);
-                await fetch(node.url, { method: 'HEAD', mode: 'no-cors', cache: 'no-cache', signal: controller.signal });
-                clearTimeout(timeoutId);
-              } catch (err) {
-                brokenLinks.push({ node, error: err.message });
+            const scanResult = await toolsModule.runBrokenLinkScan(links, scanSession, {
+              concurrency: 4,
+              cache: deadLinkProbeCache,
+              cacheTtlMs: DEAD_LINK_CACHE_TTL_MS,
+              onProgress: (completed, total) => {
+                completedCount = completed;
+                if (completed % 10 === 0 || completed === total) {
+                  setToolDetailStatusText(`运行中：正在探测 ${completed}/${total}...`);
+                }
               }
-
-              completedCount++;
-              if (completedCount % 10 === 0 || completedCount === links.length) {
-                toolDetailStatus.innerHTML = `<span style="color:var(--text-secondary)">运行中：正在探测 ${completedCount}/${links.length}...</span>`;
-              }
-
-              await checkNext();
-            }
-
-            let workers = [];
-            for (let i = 0; i < concurrencyLimit; i++) {
-              workers.push(checkNext());
-            }
-
-            await Promise.all(workers);
-
-            if (brokenLinks.length === 0) {
-              toolDetailStatus.innerHTML = `<span style="color:#34c759">扫描完成：${links.length} 个链接均可访问。</span>`;
-              toolsResultList.innerHTML = '<div style="text-align:center; padding: 20px;">🎉 全部链接均正常！</div>';
-              document.getElementById('statusBrokenLinks').textContent = '上次扫描：未发现死链';
-              btn.disabled = false;
-              btn.textContent = '重新检测';
-              btn.className = 'tool-btn tool-btn-secondary';
-              return;
-            }
-
-            toolDetailStatus.innerHTML = `<span style="color:#d97706; font-weight:bold;">扫描完成：发现 ${brokenLinks.length} 个失效链接。</span>`;
-            document.getElementById('statusBrokenLinks').textContent = `上次扫描：${brokenLinks.length} 个死链`;
-
-            let html = `<div style="margin-bottom: 12px; border:1px solid var(--border-color); padding: 8px; border-radius: 6px; background: var(--bg-surface);">`;
-            brokenLinks.forEach(b => {
-              html += `<div style="display:flex; align-items:center; margin-bottom:6px; gap:8px;">
-                        <input type="checkbox" class="broken-checkbox" data-id="${b.node.id}" checked>
-                        <span style="flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:13px;" title="${escapeHtml(b.node.url)}">❌ ${escapeHtml(b.node.title || '无标题')}</span>
-                       </div>
-                       <div style="font-size:11px; color:#ff3b30; margin-left: 24px; margin-bottom: 8px; word-break: break-all;">${escapeHtml(b.node.url)}<br>[Error: ${escapeHtml(b.error || 'Failed to fetch')}]</div>`;
             });
-            html += `</div>`;
+            schedulePersistDeadLinkProbeCache();
+
+            if (scanSession.cancelled) {
+              if (brokenLinkScanSession === scanSession) brokenLinkScanSession = null;
+              return;
+            }
+
+            const brokenLinks = scanResult.brokenLinks || [];
+            const uncertainLinks = scanResult.uncertainLinks || [];
+            const cacheHits = scanResult.cacheHits || 0;
+
+            if (brokenLinks.length === 0 && uncertainLinks.length === 0) {
+              const suffix = cacheHits > 0 ? `（缓存复用 ${cacheHits} 条）` : '';
+              setToolDetailStatusText(`扫描完成：${totalCount} 个链接均可访问。${suffix}`, 'success');
+              setToolsResultMessage('🎉 全部链接均正常！');
+              document.getElementById('statusBrokenLinks').textContent = '上次扫描：未发现死链';
+              toolDetailFooter.style.display = 'none';
+              setScanIdle();
+              if (brokenLinkScanSession === scanSession) brokenLinkScanSession = null;
+              return;
+            }
+
+            if (brokenLinks.length > 0) {
+              const suffix = cacheHits > 0 ? `（缓存复用 ${cacheHits} 条）` : '';
+              setToolDetailStatusText(`扫描完成：确认失效 ${brokenLinks.length} 条，待复核 ${uncertainLinks.length} 条。${suffix}`, 'warning', true);
+            } else {
+              const suffix = cacheHits > 0 ? `（缓存复用 ${cacheHits} 条）` : '';
+              setToolDetailStatusText(`扫描完成：未发现高置信失效链接，待复核 ${uncertainLinks.length} 条。${suffix}`, 'warning', true);
+            }
+            document.getElementById('statusBrokenLinks').textContent = `上次扫描：${brokenLinks.length} 确认失效 / ${uncertainLinks.length} 待复核`;
+
+            let html = '';
+            if (brokenLinks.length > 0) {
+              html += `<div class="tool-check-group-title">确认失效（高置信）</div>`;
+              html += `<div class="tool-check-group">`;
+              brokenLinks.forEach((b) => {
+                const reason = getBrokenProbeReasonLabel(b.probe);
+                html += `<div class="tool-check-item">
+                          <input type="checkbox" class="broken-checkbox" data-id="${b.node.id}" checked>
+                          <span class="tool-check-label" title="${escapeHtml(b.node.url)}">❌ ${escapeHtml(b.node.title || '无标题')}</span>
+                         </div>
+                         <div class="tool-check-url tool-check-url-error">${escapeHtml(b.node.url)}<br>[${escapeHtml(reason)}]</div>`;
+              });
+              html += `</div>`;
+            }
+            if (uncertainLinks.length > 0) {
+              html += `<div class="tool-check-group-title">待复核（可能受跨域、防爬、网络波动影响）</div>`;
+              html += `<div class="tool-check-group tool-check-group-dashed">`;
+              uncertainLinks.forEach((u) => {
+                const reason = getBrokenProbeReasonLabel(u.probe);
+                html += `<div class="tool-check-item">
+                          <input type="checkbox" class="broken-checkbox" data-id="${u.node.id}">
+                          <span class="tool-check-label" title="${escapeHtml(u.node.url)}">⚠️ ${escapeHtml(u.node.title || '无标题')}</span>
+                         </div>
+                         <div class="tool-check-url tool-check-url-warn">${escapeHtml(u.node.url)}<br>[${escapeHtml(reason)}]</div>`;
+              });
+              html += `</div>`;
+            }
 
             toolDetailFooter.style.display = 'flex';
             toolDetailFooter.style.justifyContent = 'center';
             toolDetailFooter.innerHTML = `<button id="btnCleanBrokenLinks" class="tool-btn tool-btn-danger">清理选中项</button>`;
             toolsResultList.innerHTML = html;
-            btn.disabled = false;
-            btn.textContent = '重新检测';
-            btn.className = 'tool-btn tool-btn-secondary';
+            setScanIdle();
+            if (brokenLinkScanSession === scanSession) brokenLinkScanSession = null;
 
-            document.getElementById('btnCleanBrokenLinks').addEventListener('click', (eClean) => {
+            document.getElementById('btnCleanBrokenLinks').addEventListener('click', async (eClean) => {
               const checkboxes = toolsResultList.querySelectorAll('.broken-checkbox:checked');
               if (checkboxes.length === 0) return;
+              if (!(await confirmDangerAction(
+                `确定删除选中的 ${checkboxes.length} 条链接吗？`,
+                {
+                  okText: '删除',
+                  hint: brokenLinks.length === 0 ? '当前均为待复核条目，建议先手动确认后再删除。'
+                    : '已包含高置信失效条目，仍建议在删除前快速复核。'
+                }
+              ))) return;
               eClean.target.className = 'tool-btn tool-btn-danger';
               eClean.target.disabled = true;
               eClean.target.textContent = '清理中...';
-              toolDetailStatus.innerHTML = '<span style="color:var(--text-secondary)">处理中：正在移除选中项...</span>';
+              setToolDetailStatusText('处理中：正在移除选中项...');
               let promises = Array.from(checkboxes).map(cb => {
                 return new Promise(res => chrome.bookmarks.remove(cb.getAttribute('data-id'), res));
               });
@@ -1786,7 +2049,7 @@ document.addEventListener('DOMContentLoaded', function () {
       btnCleanEmptyFolders.addEventListener('click', () => {
         openToolView('清理空文件夹');
         toolDetailStatus.style.display = 'flex';
-        toolDetailStatus.innerHTML = '<span style="color:var(--text-secondary)">状态：尚未分析</span>';
+        setToolDetailStatusText('状态：尚未分析');
         toolDetailMainAction.innerHTML = `<button id="btnStartCleanEmpty" class="tool-btn tool-btn-primary">开始扫描</button>`;
         toolDetailWarning.style.display = 'block';
         toolDetailWarning.innerHTML = '💡 提示：扫描并永久清理内部不含有任何书签、也没有有效子文件夹的空壳结构。';
@@ -1797,8 +2060,8 @@ document.addEventListener('DOMContentLoaded', function () {
           btn.disabled = true;
           btn.textContent = '处理中...';
           toolDetailStatus.style.display = 'flex';
-          toolDetailStatus.innerHTML = '<span style="color:var(--text-secondary)">运行中：正在扫描结构...</span>';
-          toolsResultList.innerHTML = '<div style="color:var(--text-tertiary); padding:16px; text-align:center;">处理中...</div>';
+          setToolDetailStatusText('运行中：正在扫描结构...');
+          setToolsResultMessage('处理中...');
 
           getBookmarkTreeCached((tree) => {
             let emptyFolders = [];
@@ -1820,8 +2083,8 @@ document.addEventListener('DOMContentLoaded', function () {
             traverse(tree);
 
             if (emptyFolders.length === 0) {
-              toolDetailStatus.innerHTML = '<span style="color:#34c759">扫描完成：未发现任何空文件夹。</span>';
-              toolsResultList.innerHTML = '<div style="text-align:center; padding: 20px;">🎉 您的书签库非常整洁！</div>';
+              setToolDetailStatusText('扫描完成：未发现任何空文件夹。', 'success');
+              setToolsResultMessage('🎉 您的书签库非常整洁！');
               document.getElementById('statusEmptyFolders').textContent = '上次扫描：0 个空壳';
               btn.disabled = false;
               btn.textContent = '重新扫描';
@@ -1829,14 +2092,14 @@ document.addEventListener('DOMContentLoaded', function () {
               return;
             }
 
-            toolDetailStatus.innerHTML = `<span style="color:#d97706; font-weight:bold;">扫描完成：发现 ${emptyFolders.length} 个空壳文件夹。</span>`;
+            setToolDetailStatusText(`扫描完成：发现 ${emptyFolders.length} 个空壳文件夹。`, 'warning', true);
             document.getElementById('statusEmptyFolders').textContent = `上次扫描：${emptyFolders.length} 个空壳`;
 
-            let html = `<div style="margin-bottom: 12px; border:1px solid var(--border-color); padding: 8px; border-radius: 6px; background: var(--bg-surface);">`;
+            let html = `<div class="tool-check-group">`;
             emptyFolders.forEach((node) => {
-              html += `<div style="display:flex; align-items:center; margin-bottom:6px; gap:8px;">
+              html += `<div class="tool-check-item">
                         <input type="checkbox" class="empty-folder-checkbox" data-id="${node.id}" checked>
-                        <span style="flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:13px;" title="${escapeHtml(node.title)}">📁 ${escapeHtml(node.title || '未命名')}</span>
+                        <span class="tool-check-label" title="${escapeHtml(node.title)}">📁 ${escapeHtml(node.title || '未命名')}</span>
                        </div>`;
             });
             html += `</div>`;
@@ -1849,13 +2112,14 @@ document.addEventListener('DOMContentLoaded', function () {
             btn.textContent = '重新扫描';
             btn.className = 'tool-btn tool-btn-secondary';
 
-            document.getElementById('btnCleanFolders').addEventListener('click', (eClean) => {
+            document.getElementById('btnCleanFolders').addEventListener('click', async (eClean) => {
               const checkboxes = toolsResultList.querySelectorAll('.empty-folder-checkbox:checked');
               if (checkboxes.length === 0) return;
+              if (!(await confirmDangerAction(`确定删除选中的 ${checkboxes.length} 个空文件夹吗？`, { okText: '删除' }))) return;
               eClean.target.className = 'tool-btn tool-btn-danger';
               eClean.target.disabled = true;
               eClean.target.textContent = '清理中...';
-              toolDetailStatus.innerHTML = '<span style="color:var(--text-secondary)">处理中：正在移除选中项...</span>';
+              setToolDetailStatusText('处理中：正在移除选中项...');
               let promises = Array.from(checkboxes).map(cb => {
                 return new Promise(res => chrome.bookmarks.removeTree(cb.getAttribute('data-id'), res));
               });
@@ -1879,26 +2143,26 @@ document.addEventListener('DOMContentLoaded', function () {
 
         toolsResultList.innerHTML = `
           <!-- 规则配置区 -->
-          <div id="urlReplaceRuleArea" style="display:flex; flex-direction:column; gap:12px; margin-bottom:16px;">
-            <div style="font-size:13px; font-weight:500; color:var(--text-primary);">查找与替换规则</div>
-            <input type="text" id="urlFindTarget" placeholder="查找内容 (例如: old-domain.com)" class="search-input" spellcheck="false" autocomplete="off" style="font-size:13px; padding:10px 12px;">
-            <input type="text" id="urlReplaceTarget" placeholder="替换为 (留空表示删除匹配内容)" class="search-input" spellcheck="false" autocomplete="off" style="font-size:13px; padding:10px 12px;">
-            <div style="font-size:12px; color:var(--text-tertiary); margin-top:2px;">作用范围：所有书签 URL</div>
+          <div id="urlReplaceRuleArea" class="url-replace-rule-area">
+            <div class="url-replace-title">查找与替换规则</div>
+            <input type="text" id="urlFindTarget" placeholder="查找内容 (例如: old-domain.com)" class="search-input url-replace-input" spellcheck="false" autocomplete="off">
+            <input type="text" id="urlReplaceTarget" placeholder="替换为 (留空表示删除匹配内容)" class="search-input url-replace-input" spellcheck="false" autocomplete="off">
+            <div class="url-replace-scope">作用范围：所有书签 URL</div>
             
-            <button id="btnStartUrlPreview" class="tool-btn tool-btn-primary" style="margin-top:8px;" disabled>执行预演</button>
+            <button id="btnStartUrlPreview" class="tool-btn tool-btn-primary url-replace-preview-btn" disabled>执行预演</button>
           </div>
 
           <!-- 动态状态区 -->
-          <div id="urlStatusArea" style="font-size:13px; padding:12px; border-radius:8px; background:var(--bg-hover); color:var(--text-secondary); margin-bottom:16px; display:flex; align-items:flex-start; gap:8px;">
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="flex-shrink:0; margin-top:2px; color:var(--accent-color);"><circle cx="12" cy="12" r="10"></circle><path d="M12 16v-4"></path><path d="M12 8h.01"></path></svg>
+          <div id="urlStatusArea" class="url-status-area">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="url-status-icon"><circle cx="12" cy="12" r="10"></circle><path d="M12 16v-4"></path><path d="M12 8h.01"></path></svg>
             <div>
-              <div style="font-weight:500; color:var(--text-primary); margin-bottom:4px;">操作提示</div>
-              <div id="urlStatusText" style="line-height:1.4;">请在上方输入查找内容和替换内容，然后点击"执行预演"</div>
+              <div class="url-status-heading">操作提示</div>
+              <div id="urlStatusText" class="url-status-text">请在上方输入查找内容和替换内容，然后点击"执行预演"</div>
             </div>
           </div>
 
           <!-- 预演结果展示区 -->
-          <div id="urlPreviewArea" style="display:none; flex-direction:column; gap:8px;"></div>
+          <div id="urlPreviewArea" class="url-preview-area is-hidden"></div>
         `;
 
         toolDetailWarning.style.display = 'block';
@@ -1937,7 +2201,7 @@ document.addEventListener('DOMContentLoaded', function () {
           previewBtn.disabled = true;
           previewBtn.textContent = '正在扫描...';
           statusArea.style.color = 'var(--text-secondary)';
-          statusArea.innerHTML = '<div style="display:flex; align-items:center; gap:8px;"><svg class="spin-icon" viewBox="0 0 24 24" fill="none" width="14" height="14" stroke="currentColor" stroke-width="2"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg> 正在预演替换结果...</div>';
+          statusArea.innerHTML = '<div class="url-inline-spinner"><svg class="spin-icon" viewBox="0 0 24 24" fill="none" width="14" height="14" stroke="currentColor" stroke-width="2"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg> 正在预演替换结果...</div>';
           previewArea.style.display = 'none';
           toolDetailFooter.style.display = 'none';
 
@@ -1979,29 +2243,29 @@ document.addEventListener('DOMContentLoaded', function () {
               const maxPreview = 5;
               const previewMatches = matches.slice(0, maxPreview);
 
-              let html = `<div style="font-size:13px; padding:12px; border-radius:8px; background:var(--bg-hover); color:var(--text-secondary); margin-bottom:16px; display:flex; align-items:flex-start; gap:8px;">
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#d97706" stroke-width="2" style="flex-shrink:0; margin-top:2px;"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="8" x2="12" y2="12"></line><line x1="12" y1="16" x2="12.01" y2="16"></line></svg>
+              let html = `<div class="url-preview-summary">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#d97706" stroke-width="2" class="url-preview-summary-icon"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="8" x2="12" y2="12"></line><line x1="12" y1="16" x2="12.01" y2="16"></line></svg>
             <div>
-              <div style="font-weight:600; color:#d97706; margin-bottom:4px;">扫描结果</div>
-              <div style="line-height:1.4;">找到 ${matches.length} 条可替换链接，请仔细确认以下变更记录：</div>
+              <div class="url-preview-summary-title">扫描结果</div>
+              <div class="url-preview-summary-text">找到 ${matches.length} 条可替换链接，请仔细确认以下变更记录：</div>
             </div>
           </div>`;
 
-              html += `<div style="font-size:12px; font-weight:500; color:var(--text-primary); margin-bottom:4px;">预览样例 (前 ${previewMatches.length} 条)</div>`;
-              html += `<div style="background:var(--bg-base); border-radius:6px; border:1px solid var(--border-color); padding:12px; display:flex; flex-direction:column; gap:12px;">`;
+              html += `<div class="url-preview-title">预览样例 (前 ${previewMatches.length} 条)</div>`;
+              html += `<div class="url-preview-list">`;
 
               previewMatches.forEach(m => {
                 html += `
-                  <div style="font-size:12px; display:flex; flex-direction:column; gap:4px;">
-                    <div style="font-weight:600; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:var(--text-primary);">${escapeHtml(m.node.title || '无标题')}</div>
-                    <div style="color:#ff3b30; text-decoration:line-through; word-break:break-all; opacity:0.8;">- ${escapeHtml(m.oldUrl)}</div>
-                    <div style="color:#34c759; word-break:break-all; font-weight:500;">+ ${escapeHtml(m.newUrl)}</div>
+                  <div class="url-preview-item">
+                    <div class="url-preview-item-title">${escapeHtml(m.node.title || '无标题')}</div>
+                    <div class="url-preview-old">- ${escapeHtml(m.oldUrl)}</div>
+                    <div class="url-preview-new">+ ${escapeHtml(m.newUrl)}</div>
                   </div>
                 `;
               });
 
               if (matches.length > maxPreview) {
-                html += `<div style="font-size:12px; color:var(--text-tertiary); text-align:center; padding-top:4px; border-top:1px dashed var(--border-color);">...及其他 ${matches.length - maxPreview} 项</div>`;
+                html += `<div class="url-preview-more">...及其他 ${matches.length - maxPreview} 项</div>`;
               }
               html += `</div>`;
               previewArea.innerHTML = html;
@@ -2010,8 +2274,8 @@ document.addEventListener('DOMContentLoaded', function () {
               toolDetailFooter.style.display = 'flex';
               toolDetailFooter.style.gap = '12px';
               toolDetailFooter.innerHTML = `
-                <button id="btnEditRule" class="tool-btn tool-btn-secondary" style="flex:1;">编辑规则</button>
-                <button id="btnConfirmReplace" class="tool-btn tool-btn-danger" style="flex:2;">确认替换 ${matches.length} 条</button>
+                <button id="btnEditRule" class="tool-btn tool-btn-secondary tool-flex-1">编辑规则</button>
+                <button id="btnConfirmReplace" class="tool-btn tool-btn-danger tool-flex-2">确认替换 ${matches.length} 条</button>
               `;
 
               // 返回编辑
@@ -2030,13 +2294,14 @@ document.addEventListener('DOMContentLoaded', function () {
               });
 
               // 确认执行
-              document.getElementById('btnConfirmReplace').addEventListener('click', (eConfirm) => {
+              document.getElementById('btnConfirmReplace').addEventListener('click', async (eConfirm) => {
                 const confirmBtn = eConfirm.target;
                 const editBtn = document.getElementById('btnEditRule');
+                if (!(await confirmDangerAction(`确定替换这 ${matches.length} 条 URL 吗？`, { okText: '替换' }))) return;
 
                 confirmBtn.disabled = true;
                 editBtn.disabled = true;
-                confirmBtn.innerHTML = '<div style="display:flex; align-items:center; gap:8px;"><svg class="spin-icon" viewBox="0 0 24 24" fill="none" width="14" height="14" stroke="currentColor" stroke-width="2"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg> 正在替换...</div>';
+                confirmBtn.innerHTML = '<div class="url-inline-spinner"><svg class="spin-icon" viewBox="0 0 24 24" fill="none" width="14" height="14" stroke="currentColor" stroke-width="2"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg> 正在替换...</div>';
 
                 statusArea.style.display = 'flex';
                 statusArea.style.color = 'var(--text-secondary)';
@@ -2058,7 +2323,7 @@ document.addEventListener('DOMContentLoaded', function () {
 
                   const doneBtn = document.createElement('button');
                   doneBtn.className = 'tool-btn tool-btn-primary';
-                  doneBtn.style.flex = '1';
+                  doneBtn.classList.add('tool-flex-1');
                   doneBtn.textContent = '完成并返回';
                   doneBtn.onclick = () => {
                     closeToolView();
@@ -2077,22 +2342,100 @@ document.addEventListener('DOMContentLoaded', function () {
   }
 
   // --- IMPORT HANDLE ---
-  function handleImport(e) {
+  function getBookmarkImportService() {
+    if (
+      !bookmarkService
+      || !bookmarkService.readFileAsText
+      || !bookmarkService.parseImportedHtmlBookmarks
+      || !bookmarkService.countImportableNodes
+      || !bookmarkService.getImportParentId
+      || !bookmarkService.createBookmarkAsync
+      || !bookmarkService.importNodesRecursive
+    ) {
+      throw new Error('导入模块未加载');
+    }
+    return bookmarkService;
+  }
+
+  async function handleImport(e) {
     const file = e.target.files[0];
     if (!file) return;
-    const reader = new FileReader();
-    reader.onload = (ev) => {
-      try {
-        const data = JSON.parse(ev.target.result);
-        alert('导入功能正在适配中...');
-        toolDetailStatus.innerHTML = '<span style="color:#34c759">状态：导入适配中</span>';
-      } catch (err) {
-        alert('导入失败：格式错误');
-        toolDetailStatus.innerHTML = '<span style="color:#ff3b30">状态：导入失败（格式错误）</span>';
+
+    try {
+      const importService = getBookmarkImportService();
+      toolDetailStatus.style.display = 'flex';
+      setToolDetailStatusText('状态：正在读取导入文件...');
+      setToolsResultMessage('正在解析文件...');
+
+      const rawText = await importService.readFileAsText(file);
+      const parsedNodes = importService.parseImportedHtmlBookmarks(rawText);
+      const summary = importService.countImportableNodes(parsedNodes);
+
+      if (summary.total === 0) {
+        setToolDetailStatusText('状态：未检测到可导入的书签条目', 'warning');
+        setToolsResultMessage('文件中没有可导入的数据');
+        return;
       }
-    };
-    reader.readAsText(file);
-    e.target.value = '';
+
+      const shouldImport = await confirmDangerAction(
+        `将从 "${file.name}" 导入 ${summary.bookmarks} 个书签、${summary.folders} 个文件夹。`,
+        {
+          title: '确认导入书签',
+          hint: '将自动创建一个导入文件夹，导入后可继续手动整理。',
+          okText: '开始导入',
+          variant: 'normal'
+        }
+      );
+      if (!shouldImport) {
+        setToolDetailStatusText('状态：已取消导入');
+        toolsResultList.innerHTML = '';
+        return;
+      }
+
+      const importParentId = await importService.getImportParentId(chrome);
+      const baseName = (file.name || '书签').replace(/\.[^.]+$/, '').trim() || '书签';
+      const stamp = new Date().toISOString().slice(0, 16).replace('T', ' ').replace(':', '-');
+      const importFolder = await importService.createBookmarkAsync(chrome, {
+        parentId: importParentId,
+        title: `Jade导入 · ${baseName} · ${stamp}`
+      });
+
+      const stats = {
+        folders: 1, // 含导入根文件夹
+        bookmarks: 0,
+        skipped: 0,
+        processed: 0,
+        total: summary.total
+      };
+
+      setToolDetailStatusText('状态：正在导入 0%');
+      await importService.importNodesRecursive(chrome, importFolder.id, parsedNodes, stats, (processed, total) => {
+        const safeTotal = Math.max(total, 1);
+        const pct = Math.min(100, Math.round((processed / safeTotal) * 100));
+        setToolDetailStatusText(`状态：正在导入 ${pct}%（${processed}/${safeTotal}）`);
+      });
+
+      invalidateBookmarkTreeCache();
+      refreshView();
+
+      document.getElementById('statusImport').textContent = `上次导入：${stats.bookmarks} 书签 / ${stats.folders} 文件夹`;
+      setToolDetailStatusText(`状态：导入完成（成功 ${stats.bookmarks + stats.folders} 项，跳过 ${stats.skipped} 项）`, 'success');
+      toolsResultList.innerHTML = `
+        <div class="import-summary-card">
+          <div class="import-summary-title">导入目录：${escapeHtml(importFolder.title)}</div>
+          <div class="import-summary-meta">
+            成功导入书签：${stats.bookmarks}<br>
+            成功导入文件夹：${stats.folders}<br>
+            跳过条目：${stats.skipped}
+          </div>
+        </div>
+      `;
+    } catch (err) {
+      setToolDetailStatusText(`状态：导入失败（${err.message || '未知错误'}）`, 'error');
+      setToolsResultMessage('导入失败，请检查文件格式是否为标准 HTML 书签文件', 'error');
+    } finally {
+      e.target.value = '';
+    }
   }
 
   // --- EXPORT HANDLE (HTML) ---
@@ -2137,8 +2480,8 @@ document.addEventListener('DOMContentLoaded', function () {
         saveAs: true
       }, () => {
         URL.revokeObjectURL(url);
-        toolDetailStatus.innerHTML = '<span style="color:#34c759">状态：导出成功</span>';
-        toolsResultList.innerHTML = `<div style="color:var(--text-secondary); padding:16px; text-align:center;">导出任务已提交 (${dateStr})</div>`;
+        setToolDetailStatusText('状态：导出成功', 'success');
+        setToolsResultMessage(`导出任务已提交 (${dateStr})`);
         if (btn) {
           btn.disabled = false;
           btn.textContent = '重新导出';
@@ -2148,3 +2491,4 @@ document.addEventListener('DOMContentLoaded', function () {
     });
   }
 });
+

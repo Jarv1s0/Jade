@@ -17,6 +17,8 @@
     providerSelector: document.getElementById('provider-selector'),
     favBtn: document.getElementById('fav-btn'),
     refreshBtn: document.getElementById('refresh-btn'),
+    refreshWrapper: document.getElementById('refresh-wrapper'),
+    sourceMenu: document.getElementById('source-menu'),
     clearFavoritesBtn: document.getElementById('clear-favorites-btn'),
     storyCard: document.getElementById('story-card'),
     storyTitle: document.getElementById('story-title'),
@@ -43,11 +45,20 @@
     },
     DEFAULT_SETTINGS: {
       provider: 'bing' // 'bing', 'nasa', 'picsum', 'favorites'
+    },
+    NETWORK: {
+      REQUEST_TIMEOUT_MS: 9000,
+      REQUEST_RETRIES: 2,
+      REQUEST_RETRY_DELAY_MS: 350,
+      IMAGE_TIMEOUT_MS: 12000,
+      IMAGE_RETRIES: 1,
+      IMAGE_RETRY_DELAY_MS: 300
     }
   };
 
-    // 当前壁纸的元数据（用于收藏）
+  // 当前壁纸的元数据（用于收藏）
   let currentWallpaperData = null;
+  let wallpaperRenderToken = 0;
 
   // =============================
   //  2. 基础存储与缓存工具
@@ -77,6 +88,92 @@
       await Storage.set(key, { payload, timestamp: Date.now() });
     }
   };
+
+  function sleep(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+  }
+
+  function isRetryableStatus(status) {
+    return status === 408 || status === 425 || status === 429 || status >= 500;
+  }
+
+  async function fetchWithRetry(url, options = {}) {
+    const timeoutMs = Number.isFinite(options.timeoutMs) ? options.timeoutMs : CONSTANTS.NETWORK.REQUEST_TIMEOUT_MS;
+    const retries = Number.isFinite(options.retries) ? options.retries : CONSTANTS.NETWORK.REQUEST_RETRIES;
+    const retryDelayMs = Number.isFinite(options.retryDelayMs) ? options.retryDelayMs : CONSTANTS.NETWORK.REQUEST_RETRY_DELAY_MS;
+    const retryOnStatus = typeof options.retryOnStatus === 'function' ? options.retryOnStatus : isRetryableStatus;
+    const fetchOptions = options.fetchOptions || {};
+    let lastError = null;
+
+    for (let attempt = 0; attempt <= retries; attempt++) {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), timeoutMs);
+      try {
+        const res = await fetch(url, {
+          cache: 'no-store',
+          redirect: 'follow',
+          ...fetchOptions,
+          signal: controller.signal
+        });
+        if (!res.ok && attempt < retries && retryOnStatus(res.status)) {
+          await sleep(retryDelayMs * (attempt + 1));
+          continue;
+        }
+        return res;
+      } catch (err) {
+        lastError = err;
+        if (attempt >= retries) break;
+        await sleep(retryDelayMs * (attempt + 1));
+      } finally {
+        clearTimeout(timer);
+      }
+    }
+
+    throw lastError || new Error('Fetch failed');
+  }
+
+  function preloadImage(url, timeoutMs = CONSTANTS.NETWORK.IMAGE_TIMEOUT_MS) {
+    return new Promise((resolve, reject) => {
+      const img = new Image();
+      let settled = false;
+      const complete = (err) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        img.onload = null;
+        img.onerror = null;
+        if (err) reject(err);
+        else resolve(url);
+      };
+
+      const timer = setTimeout(() => complete(new Error('Image timeout')), timeoutMs);
+      img.onload = () => complete(null);
+      img.onerror = () => complete(new Error('Image load error'));
+      img.decoding = 'async';
+      img.referrerPolicy = 'no-referrer';
+      img.src = url;
+    });
+  }
+
+  async function preloadImageWithRetry(url, options = {}) {
+    const retries = Number.isFinite(options.retries) ? options.retries : CONSTANTS.NETWORK.IMAGE_RETRIES;
+    const retryDelayMs = Number.isFinite(options.retryDelayMs) ? options.retryDelayMs : CONSTANTS.NETWORK.IMAGE_RETRY_DELAY_MS;
+    const timeoutMs = Number.isFinite(options.timeoutMs) ? options.timeoutMs : CONSTANTS.NETWORK.IMAGE_TIMEOUT_MS;
+    let lastError = null;
+
+    for (let attempt = 0; attempt <= retries; attempt++) {
+      try {
+        await preloadImage(url, timeoutMs);
+        return;
+      } catch (err) {
+        lastError = err;
+        if (attempt >= retries) break;
+        await sleep(retryDelayMs * (attempt + 1));
+      }
+    }
+
+    throw lastError || new Error('Image preload failed');
+  }
 
     // 防重复历史记录管理器 (最近观看的壁纸 URL，防止连续刷出同样的图)
   const HistoryManager = {
@@ -183,7 +280,7 @@
 
       const fetchUrl = `${CONSTANTS.BING_API}?date=${dateStr}&size=UHD&type=json`;
 
-      const response = await fetch(fetchUrl);
+      const response = await fetchWithRetry(fetchUrl);
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       const data = await response.json();
       const imageUrl = data.imgurl || data.imgurl_d || data.url;
@@ -280,7 +377,9 @@
         const d = String(targetDate.getDate()).padStart(2, '0');
 
         const fetchUrl = `${CONSTANTS.NASA_API}&date=${y}-${m}-${d}`;
-        const response = await fetch(fetchUrl);
+        const response = await fetchWithRetry(fetchUrl, {
+          retryOnStatus: (status) => status === 429 || isRetryableStatus(status)
+        });
         if (!response.ok) {
           if (response.status === 429) throw new Error('NASA Rate Limit Exceeded');
           // 404 等错误（当天图片尚未发布），跳到前一天
@@ -353,8 +452,9 @@
   };
 
   // =============================
-  function applyWallpaper(data) {
-    if (!data) return;
+  async function applyWallpaper(data, renderToken) {
+    if (!data) return false;
+    if (renderToken !== wallpaperRenderToken) return false;
     currentWallpaperData = data;
 
     // 清除可能存在的之前的图片层并重置淡入动画状态
@@ -370,25 +470,17 @@
       DOM.bgImage.classList.add('loaded');
       updateCopyright(data.copyright);
       updateFavoriteButtonState();
+      return true;
     } else {
-      // 渲染图片
-      const img = new Image();
-      img.onload = () => {
-        // 使用一个微小延时确保 DOM 移除 loaded 后能重新触发 CSS 过渡动画
-        setTimeout(() => {
-          DOM.bgImage.style.backgroundImage = `url(${data.url})`;
-          DOM.bgImage.style.backgroundSize = 'cover';
-          DOM.bgOverlay.style.opacity = '1';
-          DOM.bgImage.classList.add('loaded');
-        }, 50);
-      };
-      img.onerror = () => {
-        console.warn('[NewTab] 图片加载失败:', data.url);
-        fallbackToDefault();
-      };
-      img.src = data.url;
+      await preloadImageWithRetry(data.url);
+      if (renderToken !== wallpaperRenderToken) return false;
+      DOM.bgImage.style.backgroundImage = `url(${data.url})`;
+      DOM.bgImage.style.backgroundSize = 'cover';
+      DOM.bgOverlay.style.opacity = '1';
+      DOM.bgImage.classList.add('loaded');
       updateCopyright(data.copyright);
       updateFavoriteButtonState();
+      return true;
     }
   }
 
@@ -459,6 +551,7 @@
   //  6. 执行引擎
   // =============================
   async function renderBackground(forceRefresh = false) {
+    const renderToken = ++wallpaperRenderToken;
     const providerKey = SettingsManager.settings.provider;
 
     // 定义不同壁纸源的轮播/保持间隔毫秒数
@@ -483,8 +576,12 @@
           if (cached._bingDateOffset !== undefined) WallpaperProviders._bingDateOffset = cached._bingDateOffset;
           if (cached._nasaDateOffset !== undefined) WallpaperProviders._nasaDateOffset = cached._nasaDateOffset;
 
-          applyWallpaper(cached);
-          return;
+          try {
+            const applied = await applyWallpaper(cached, renderToken);
+            if (applied) return;
+          } catch (cacheErr) {
+            console.warn('[NewTab] 缓存壁纸加载失败，改为重新拉取:', cacheErr.message);
+          }
         }
       }
     }
@@ -494,7 +591,8 @@
 
     try {
       const data = await providerFn.call(WallpaperProviders, forceRefresh);
-      applyWallpaper(data);
+      const applied = await applyWallpaper(data, renderToken);
+      if (!applied || renderToken !== wallpaperRenderToken) return;
       // 新数据成功后，统一在此处写入持久化，并放入不重复历史名单。同时保存当下的日期偏移量。
       const cacheData = {
         ...data,
@@ -508,9 +606,12 @@
       // 其他任何获取异常（如无网络、接口报错等）全部回退到必应（必应非常稳定）
       try {
         const data = await WallpaperProviders.bing();
-        applyWallpaper(data);
+        const applied = await applyWallpaper(data, renderToken);
+        if (!applied || renderToken !== wallpaperRenderToken) return;
       } catch (e) {
-        fallbackToDefault();
+        if (renderToken === wallpaperRenderToken) {
+          fallbackToDefault();
+        }
       }
     }
   }
@@ -553,7 +654,20 @@
         !DOM.copyright.contains(e.target)) {
         DOM.storyCard.classList.remove('open');
       }
+
+      if (DOM.refreshWrapper &&
+        DOM.refreshWrapper.classList.contains('menu-open') &&
+        !DOM.refreshWrapper.contains(e.target)) {
+        DOM.refreshWrapper.classList.remove('menu-open');
+      }
     });
+
+    if (DOM.refreshWrapper) {
+      DOM.refreshWrapper.addEventListener('contextmenu', (e) => {
+        e.preventDefault();
+        DOM.refreshWrapper.classList.toggle('menu-open');
+      });
+    }
 
     // 壁纸故事卡片：点击版权文字展开/关闭
     DOM.copyright.addEventListener('click', () => {
