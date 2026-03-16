@@ -91,6 +91,26 @@ body {
   box-sizing: border-box;
   z-index: 2000;
   box-shadow: 0 -4px 30px rgba(0, 0, 0, 0.5);
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255, 255, 255, 0.28) transparent;
+}
+
+.story-card::-webkit-scrollbar {
+  width: 4px;
+}
+
+.story-card::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.story-card::-webkit-scrollbar-thumb {
+  background-color: rgba(255, 255, 255, 0.16);
+  border-radius: 4px;
+  transition: background-color 0.2s;
+}
+
+.story-card:hover::-webkit-scrollbar-thumb {
+  background-color: rgba(255, 255, 255, 0.34);
 }
 
 .story-card.open {
