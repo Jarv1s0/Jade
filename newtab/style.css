@@ -152,7 +152,7 @@ body {
   text-decoration: underline;
 }
 
-/* ----- 搜索中心层 ----- */
+/* --- 搜索中心层 --- */
 #search-container {
   position: absolute;
   top: 50%;
@@ -208,7 +208,7 @@ body {
   color: #9aa0a6;
 }
 
-/* ----- 右下角浮动按钮动作区 ----- */
+/* --- 右下角浮动按钮动作区 --- */
 
 /* 通用圆形按钮样式 */
 .floating-btn {

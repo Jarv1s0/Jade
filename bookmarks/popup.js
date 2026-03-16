@@ -1,5 +1,5 @@
 document.addEventListener('DOMContentLoaded', function () {
-  // Elements
+  // 元素引用
   const searchInput = document.getElementById('searchInput');
   const shortcutHint = document.getElementById('shortcutHint');
   const breadcrumb = document.getElementById('breadcrumb');
@@ -12,11 +12,11 @@ document.addEventListener('DOMContentLoaded', function () {
   const bookmarkList = document.getElementById('bookmarkList');
   const mainPanel = document.getElementById('mainPanel');
 
-  // Footer Buttons
+  // 底部按钮
   const btnManageBookmarksBtn = document.getElementById('btnManageBookmarksBtn');
   const openToolboxBtn = document.getElementById('btnToolsMain');
 
-  // Tools Modal
+  // 工具箱模态框
   const toolsModal = document.getElementById('toolsModal');
   const toolsCloseBtn = document.getElementById('toolsCloseBtn');
   const toolsBackBtn = document.getElementById('toolsBackBtn');
@@ -32,7 +32,7 @@ document.addEventListener('DOMContentLoaded', function () {
   const btnBookmarkStats = document.getElementById('btnBookmarkStats');
   const btnBatchReplaceUrl = document.getElementById('btnBatchReplaceUrl');
 
-  // Context Menu and Edit Modal
+  // 右键菜单与编辑模态框
   const contextMenu = document.getElementById('contextMenu');
   const menuPin = document.getElementById('menuPin');
   const menuSortName = document.getElementById('menuSortName');
@@ -52,11 +52,11 @@ document.addEventListener('DOMContentLoaded', function () {
 
   const importFileInput = document.getElementById('importFileInput');
 
-  // Drag and Drop (Bookmark List)
+  // 拖拽排序 (书签列表)
   let draggedItem = null;
   let draggedItemId = null;
 
-  // State
+  // 状态变量
   let currentFolderId = '1'; // Default: Bookmarks Bar
   let navigationStack = [];
   let isSearching = false;
@@ -70,6 +70,72 @@ document.addEventListener('DOMContentLoaded', function () {
   let frequentCustomUrls = {}; // 用户自定义的常用卡片 URL
   let currentFrequentItems = []; // 当前显示的 frequent 列表引用
   let hiddenRecentUrls = []; // 被用户移除的最近访问URL
+  const bookmarkTreeCache = {
+    data: null,
+    inFlight: null
+  };
+
+  function invalidateBookmarkTreeCache() {
+    bookmarkTreeCache.data = null;
+  }
+
+  function setupBookmarkCacheInvalidation() {
+    const invalidate = () => invalidateBookmarkTreeCache();
+    const events = [
+      chrome.bookmarks.onCreated,
+      chrome.bookmarks.onRemoved,
+      chrome.bookmarks.onChanged,
+      chrome.bookmarks.onMoved,
+      chrome.bookmarks.onChildrenReordered,
+      chrome.bookmarks.onImportBegan,
+      chrome.bookmarks.onImportEnded
+    ];
+
+    events.forEach((eventObj) => {
+      if (eventObj && eventObj.addListener) {
+        eventObj.addListener(invalidate);
+      }
+    });
+  }
+
+  function getBookmarkTreeCached(callback, options = {}) {
+    const { forceRefresh = false } = options;
+    const runCallback = (tree) => {
+      if (typeof callback === 'function') {
+        callback(Array.isArray(tree) ? tree : []);
+      }
+    };
+
+    if (!forceRefresh && bookmarkTreeCache.data) {
+      runCallback(bookmarkTreeCache.data);
+      return;
+    }
+
+    if (!forceRefresh && bookmarkTreeCache.inFlight) {
+      bookmarkTreeCache.inFlight.then(runCallback);
+      return;
+    }
+
+    const request = new Promise((resolve) => {
+      chrome.bookmarks.getTree((tree) => {
+        if (chrome.runtime.lastError) {
+          console.warn('[Jade] 获取书签树失败:', chrome.runtime.lastError.message);
+          resolve([]);
+          return;
+        }
+        bookmarkTreeCache.data = tree;
+        resolve(tree);
+      });
+    });
+
+    bookmarkTreeCache.inFlight = request.finally(() => {
+      if (bookmarkTreeCache.inFlight === request) {
+        bookmarkTreeCache.inFlight = null;
+      }
+    });
+
+    request.then(runCallback);
+  }
 
   // 借助 chrome.extension.getViews 探测侧边栏，这比 innerHeight 更可靠
   let isSidePanel = false;
@@ -89,16 +155,18 @@ document.addEventListener('DOMContentLoaded', function () {
     }
   }
 
-  // Detect OS for shortcut hint
+  // 检测操作系统以显示快捷键提示
   const isMac = navigator.platform.toUpperCase().indexOf('MAC') >= 0;
   if (shortcutHint) {
     shortcutHint.textContent = isMac ? '⌘K' : 'Ctrl K';
   }
 
-  // --- INITIALIZATION ---
+  // --- 初始化 ---
   init();
 
   function init() {
+    setupBookmarkCacheInvalidation();
+
     // 载入置顶、黑名单、排序和自定义标题，然后构建首页
     chrome.storage.local.get(['pinned_bookmarks', 'frequent_order', 'frequent_custom_titles', 'frequent_custom_urls', 'hidden_recent_urls'], (res) => {
       if (res.pinned_bookmarks) {
@@ -194,7 +262,7 @@ document.addEventListener('DOMContentLoaded', function () {
     setupToolsListeners();
   }
 
-  // --- DASHBOARD BUILDER (The Launcher View) ---
+  // --- 仪表盘构建器 (启动器视图) ---
   function buildDashboard() {
     frequentSection.style.display = 'block';
     categorySection.style.display = 'block';
@@ -257,7 +325,6 @@ document.addEventListener('DOMContentLoaded', function () {
                <path d="M10 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2h-8l-2-2z"/>
              </svg>`
           : `<img src="chrome-extension://${chrome.runtime.id}/_favicon/?pageUrl=${encodeURIComponent(item.url)}&size=128"
-                  onerror="this.src='https://www.google.com/s2/favicons?domain=${domain}&sz=128'"
                   class="frequent-favicon">`;
 
         a.innerHTML = `
@@ -269,6 +336,11 @@ document.addEventListener('DOMContentLoaded', function () {
               </div>
               <span class="frequent-title">${escapeHtml(shortName)}</span>
           `;
+
+        if (!isFolder) {
+          const frequentFavicon = a.querySelector('.frequent-favicon');
+          bindFaviconFallback(frequentFavicon, domain, 128);
+        }
 
         a.onclick = (e) => {
           e.preventDefault();
@@ -288,7 +360,7 @@ document.addEventListener('DOMContentLoaded', function () {
           if (svg) svg.style.opacity = '0';
         });
 
-        // Click on pin icon directly (Remove from pinned)
+        // 直接点击固定图标 (从置顶移除)
         a.querySelector('.frequent-actions').addEventListener('click', (e) => {
           e.preventDefault();
           e.stopImmediatePropagation();
@@ -353,7 +425,7 @@ document.addEventListener('DOMContentLoaded', function () {
           frequentGrid.querySelectorAll('.frequent-card').forEach(c => c.classList.remove('drag-over'));
         });
 
-        // Right click context menu
+        // 右键菜单显示
         a.addEventListener('contextmenu', (e) => {
           e.preventDefault();
           targetNodeId = item.id || null;
@@ -367,7 +439,7 @@ document.addEventListener('DOMContentLoaded', function () {
       });
     };
 
-    chrome.bookmarks.getTree((tree) => {
+    getBookmarkTreeCached((tree) => {
       let pinnedNodes = [];
       function traverse(nodes) {
         nodes.forEach(n => {
@@ -463,23 +535,28 @@ document.addEventListener('DOMContentLoaded', function () {
           const a = document.createElement('a');
           a.className = 'recent-item';
           a.href = '#';
-          
-          // 右键菜单
+
+          // 最近访问右键菜单
           a.addEventListener('contextmenu', (e) => {
             e.preventDefault();
             targetNodeDomain = item.url; // 借用 domain 存储 url 或 id 以供后续移除动作
             showContextMenu(e, false, false, true);
           });
 
-            const domain = new URL(item.url || 'about:blank').hostname;
+          let domain = '';
+          try {
+            domain = new URL(item.url || 'about:blank').hostname;
+          } catch (e) {
+            domain = '';
+          }
 
-            const timeAgo = getTimeAgo(item.timestamp || Date.now());
-            const metaInfo = item.type === '历史记录' ? timeAgo : `${item.type} · ${timeAgo}`;
+          const timeAgo = getTimeAgo(item.timestamp || Date.now());
+          const metaInfo = item.type === '历史记录' ? timeAgo : `${item.type} · ${timeAgo}`;
 
-            a.innerHTML = `
+          a.innerHTML = `
                 <div class="recent-favicon">
                   <img src="chrome-extension://${chrome.runtime.id}/_favicon/?pageUrl=${encodeURIComponent(item.url)}&size=32"
-                       onerror="this.src='https://www.google.com/s2/favicons?domain=${domain}&sz=32'">
+                       class="recent-favicon-img">
                 </div>
                 <div class="recent-info">
                   <div class="recent-title" title="${escapeHtml(item.title)}">${escapeHtml(item.title)}</div>
@@ -487,10 +564,13 @@ document.addEventListener('DOMContentLoaded', function () {
                 </div>
             `;
 
-            a.onclick = (e) => {
-              e.preventDefault();
-              chrome.tabs.create({ url: item.url });
-            };
+          const recentFavicon = a.querySelector('.recent-favicon-img');
+          bindFaviconFallback(recentFavicon, domain, 32);
+
+          a.onclick = (e) => {
+            e.preventDefault();
+            chrome.tabs.create({ url: item.url });
+          };
 
           recentListView.appendChild(a);
         });
@@ -501,7 +581,7 @@ document.addEventListener('DOMContentLoaded', function () {
   function buildCategories() {
     categoryGrid.innerHTML = '';
 
-    chrome.bookmarks.getTree((tree) => {
+    getBookmarkTreeCached((tree) => {
       const rootNodes = tree[0].children; // [Bookmarks Bar, Other Bookmarks]
       const folders = [];
       const rootBookmarks = [];
@@ -605,34 +685,34 @@ document.addEventListener('DOMContentLoaded', function () {
 
     const diff = Date.now() - ts;
     const mins = Math.floor(diff / 60000);
-    
+
     if (mins < 1) return '刚刚';
     if (mins < 60) return `${mins} 分钟前`;
 
     const date = new Date(ts);
     const today = new Date();
-    
+
     // 检查是否为今天
-    const isToday = date.getDate() === today.getDate() && 
-                    date.getMonth() === today.getMonth() && 
-                    date.getFullYear() === today.getFullYear();
-                    
+    const isToday = date.getDate() === today.getDate() &&
+      date.getMonth() === today.getMonth() &&
+      date.getFullYear() === today.getFullYear();
+
     // 检查是否为昨天
     const yesterday = new Date(today.getTime() - 86400000);
-    const isYesterday = date.getDate() === yesterday.getDate() && 
-                        date.getMonth() === yesterday.getMonth() && 
-                        date.getFullYear() === yesterday.getFullYear();
+    const isYesterday = date.getDate() === yesterday.getDate() &&
+      date.getMonth() === yesterday.getMonth() &&
+      date.getFullYear() === yesterday.getFullYear();
 
     const hh = date.getHours().toString().padStart(2, '0');
     const mm = date.getMinutes().toString().padStart(2, '0');
 
     if (isToday) return `今天 ${hh}:${mm}`;
     if (isYesterday) return `昨天 ${hh}:${mm}`;
-    
+
     return `${date.getMonth() + 1}月${date.getDate()}日`;
   }
 
-  // --- STANDARD FOLDER NAVIGATION ---
+  // --- 标准文件夹导航 ---
   function enterFolder(id, title, isUncategorized = false) {
     isSearching = false;
     searchInput.value = '';
@@ -649,9 +729,9 @@ document.addEventListener('DOMContentLoaded', function () {
 
   function loadStandardFolder(id, isUncategorized = false) {
     currentFolderId = id;
-    
+
     if (isUncategorized) {
-      chrome.bookmarks.getTree((tree) => {
+      getBookmarkTreeCached((tree) => {
         const rootNodes = tree[0].children;
         const rootBookmarks = [];
         // 汇集所有的根目录直属书签
@@ -702,22 +782,25 @@ document.addEventListener('DOMContentLoaded', function () {
 
     const backBtn = document.createElement('span');
     backBtn.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align: middle; margin-right: 2px;"><polyline points="15 18 9 12 15 6"></polyline></svg> 返回`;
-    
+
     // 允许拖放到“返回”按钮上 (移动到上一级)
     const parentNode = navigationStack.length > 1 ? navigationStack[navigationStack.length - 2] : null; // 上一级目录 (或 undefined 当返回首页时不支持)
     if (parentNode && parentNode.id !== '0') {
-        backBtn.addEventListener('dragover', (e) => { e.preventDefault(); backBtn.classList.add('drag-over'); e.dataTransfer.dropEffect = 'move'; });
-        backBtn.addEventListener('dragleave', () => backBtn.classList.remove('drag-over'));
-        backBtn.addEventListener('drop', (e) => {
-            e.preventDefault();
-            backBtn.classList.remove('drag-over');
-            if (!draggedItemId) return;
-            chrome.bookmarks.move(draggedItemId, { parentId: parentNode.id }, () => {
-                if (!chrome.runtime.lastError && currentFolderId) loadStandardFolder(currentFolderId);
-            });
+      backBtn.addEventListener('dragover', (e) => { e.preventDefault(); backBtn.classList.add('drag-over'); e.dataTransfer.dropEffect = 'move'; });
+      backBtn.addEventListener('dragleave', () => backBtn.classList.remove('drag-over'));
+      backBtn.addEventListener('drop', (e) => {
+        e.preventDefault();
+        backBtn.classList.remove('drag-over');
+        if (!draggedItemId) return;
+        chrome.bookmarks.move(draggedItemId, { parentId: parentNode.id }, () => {
+          if (!chrome.runtime.lastError && currentFolderId) {
+            invalidateBookmarkTreeCache();
+            loadStandardFolder(currentFolderId);
+          }
         });
+      });
     }
-    
+
     backBtn.onclick = () => {
       navigationStack.pop();
       if (navigationStack.length > 0) {
@@ -736,19 +819,22 @@ document.addEventListener('DOMContentLoaded', function () {
     navigationStack.slice(1).forEach((crumb, index, arr) => {
       const span = document.createElement('span');
       span.textContent = crumb.title;
-      
+
       // 允许拖放到中间任意一层级名上 (非当前目录时有效, 即并非最后一个子节点)
       if (index < arr.length - 1 && crumb.id !== '0') {
-          span.addEventListener('dragover', (e) => { e.preventDefault(); span.classList.add('drag-over'); e.dataTransfer.dropEffect = 'move'; });
-          span.addEventListener('dragleave', () => span.classList.remove('drag-over'));
-          span.addEventListener('drop', (e) => {
-              e.preventDefault();
-              span.classList.remove('drag-over');
-              if (!draggedItemId) return;
-              chrome.bookmarks.move(draggedItemId, { parentId: crumb.id }, () => {
-                  if (!chrome.runtime.lastError && currentFolderId) loadStandardFolder(currentFolderId);
-              });
+        span.addEventListener('dragover', (e) => { e.preventDefault(); span.classList.add('drag-over'); e.dataTransfer.dropEffect = 'move'; });
+        span.addEventListener('dragleave', () => span.classList.remove('drag-over'));
+        span.addEventListener('drop', (e) => {
+          e.preventDefault();
+          span.classList.remove('drag-over');
+          if (!draggedItemId) return;
+          chrome.bookmarks.move(draggedItemId, { parentId: crumb.id }, () => {
+            if (!chrome.runtime.lastError && currentFolderId) {
+              invalidateBookmarkTreeCache();
+              loadStandardFolder(currentFolderId);
+            }
           });
+        });
       }
 
       span.onclick = () => {
@@ -902,7 +988,7 @@ document.addEventListener('DOMContentLoaded', function () {
       // 拖拽排序逻辑 (仅在非搜索的真实文件夹内生效)
       if (!isSearchResult && item.id) {
         a.draggable = true;
-        
+
         a.addEventListener('dragstart', (e) => {
           draggedItem = a;
           draggedItemId = item.id;
@@ -926,7 +1012,7 @@ document.addEventListener('DOMContentLoaded', function () {
         a.addEventListener('dragover', (e) => {
           e.preventDefault();
           if (!draggedItem || draggedItem === a) return;
-          
+
           e.dataTransfer.dropEffect = 'move';
           const rect = a.getBoundingClientRect();
           const y = e.clientY - rect.top;
@@ -945,15 +1031,16 @@ document.addEventListener('DOMContentLoaded', function () {
           e.preventDefault();
           const isInto = a.classList.contains('drag-into');
           a.classList.remove('drag-over', 'drag-into');
-          
+
           if (!draggedItemId || draggedItemId === item.id) return;
 
           // 场景 1: 跨级拖入某个文件夹内部
           if (isInto && isFolder) {
             chrome.bookmarks.move(draggedItemId, {
-               parentId: item.id
+              parentId: item.id
             }, () => {
               if (!chrome.runtime.lastError && currentFolderId) {
+                invalidateBookmarkTreeCache();
                 loadStandardFolder(currentFolderId);
               }
             });
@@ -966,11 +1053,12 @@ document.addEventListener('DOMContentLoaded', function () {
           const dropIndex = itemsArray.indexOf(a);
 
           chrome.bookmarks.move(draggedItemId, {
-             parentId: item.parentId,
-             index: dropIndex
+            parentId: item.parentId,
+            index: dropIndex
           }, () => {
             if (!chrome.runtime.lastError && currentFolderId) {
-                loadStandardFolder(currentFolderId);
+              invalidateBookmarkTreeCache();
+              loadStandardFolder(currentFolderId);
             }
           });
         });
@@ -992,6 +1080,23 @@ document.addEventListener('DOMContentLoaded', function () {
     const div = document.createElement('div');
     div.textContent = str;
     return div.innerHTML;
+  }
+
+  function escapeHtmlAttr(str) {
+    return String(str)
+      .replace(/&/g, '&amp;')
+      .replace(/"/g, '&quot;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;');
+  }
+
+  function bindFaviconFallback(img, domain, size) {
+    if (!img || !domain) return;
+    img.addEventListener('error', () => {
+      if (img.dataset.fallbackApplied === '1') return;
+      img.dataset.fallbackApplied = '1';
+      img.src = `https://www.google.com/s2/favicons?domain=${encodeURIComponent(domain)}&sz=${size}`;
+    }, { once: true });
   }
 
   let undoTimeout = null;
@@ -1044,7 +1149,7 @@ document.addEventListener('DOMContentLoaded', function () {
     });
   }
 
-  // --- CONTEXT MENU & MODALS ---
+  // --- 右键菜单与模态框处理 ---
   function showContextMenu(e, isFolder, isFrequent = false, isRecent = false) {
     const activeId = targetNodeId || targetNodeDomain;
 
@@ -1094,7 +1199,7 @@ document.addEventListener('DOMContentLoaded', function () {
       menuRemoveRecent.addEventListener('click', () => {
         const activeUrl = targetNodeDomain; // recently saved url
         if (!activeUrl) return;
-        
+
         if (!hiddenRecentUrls.includes(activeUrl)) {
           hiddenRecentUrls.push(activeUrl);
           chrome.storage.local.set({ hidden_recent_urls: hiddenRecentUrls }, () => {
@@ -1213,6 +1318,7 @@ document.addEventListener('DOMContentLoaded', function () {
   }
 
   function refreshView() {
+    invalidateBookmarkTreeCache();
     if (navigationStack.length <= 1) buildDashboard();
     else loadStandardFolder(currentFolderId);
   }
@@ -1236,7 +1342,7 @@ document.addEventListener('DOMContentLoaded', function () {
     });
   }
 
-  // --- TOOLBOX LOGIC (Drill-down View Navigation) ---
+  // --- 工具箱逻辑 (下钻视图导航) ---
   const toolDetailStatus = document.getElementById('toolDetailStatus');
   const toolDetailMainAction = document.getElementById('toolDetailMainAction');
   const toolDetailWarning = document.getElementById('toolDetailWarning');
@@ -1333,7 +1439,7 @@ document.addEventListener('DOMContentLoaded', function () {
           toolDetailStatus.innerHTML = '<span style="color:var(--text-secondary)">运行中：正在扫描整个书签库...</span>';
           toolsResultList.innerHTML = '<div style="color:var(--text-tertiary); padding:16px; text-align:center;">处理中...</div>';
 
-          chrome.bookmarks.getTree((tree) => {
+          getBookmarkTreeCached((tree) => {
             const urlMap = new Map();
             function traverse(nodes) {
               nodes.forEach(node => {
@@ -1426,7 +1532,7 @@ document.addEventListener('DOMContentLoaded', function () {
           btn.textContent = '处理中...';
           toolDetailStatus.innerHTML = '<span style="color:var(--text-secondary)">运行中：正在收集数据...</span>';
 
-          chrome.bookmarks.getTree((tree) => {
+          getBookmarkTreeCached((tree) => {
             let totalBookmarks = 0;
             let totalFolders = 0;
             let maxDepth = 0;
@@ -1568,7 +1674,7 @@ document.addEventListener('DOMContentLoaded', function () {
           toolDetailStatus.innerHTML = '<span style="color:var(--text-secondary)">运行中：正在收集所有链接...</span>';
           toolsResultList.innerHTML = '<div style="color:var(--text-tertiary); padding:16px; text-align:center;">处理中...</div>';
 
-          chrome.bookmarks.getTree(async (tree) => {
+          getBookmarkTreeCached(async (tree) => {
             let links = [];
             function traverse(nodes) {
               nodes.forEach(node => {
@@ -1694,7 +1800,7 @@ document.addEventListener('DOMContentLoaded', function () {
           toolDetailStatus.innerHTML = '<span style="color:var(--text-secondary)">运行中：正在扫描结构...</span>';
           toolsResultList.innerHTML = '<div style="color:var(--text-tertiary); padding:16px; text-align:center;">处理中...</div>';
 
-          chrome.bookmarks.getTree((tree) => {
+          getBookmarkTreeCached((tree) => {
             let emptyFolders = [];
             // 只找最底层的、没有任何子项的文件夹
             function traverse(nodes) {
@@ -1837,7 +1943,7 @@ document.addEventListener('DOMContentLoaded', function () {
 
           // 模拟稍微的延迟体现扫描过程
           setTimeout(() => {
-            chrome.bookmarks.getTree((tree) => {
+            getBookmarkTreeCached((tree) => {
               let matches = [];
               function traverse(nodes) {
                 nodes.forEach(node => {
@@ -1991,21 +2097,21 @@ document.addEventListener('DOMContentLoaded', function () {
 
   // --- EXPORT HANDLE (HTML) ---
   function handleExportBookmarks(btn) {
-    chrome.bookmarks.getTree((tree) => {
-      let htmlContent = `< !DOCTYPE NETSCAPE - Bookmark - file - 1 >
-< !--This is an automatically generated file.
+    getBookmarkTreeCached((tree) => {
+      let htmlContent = `<!DOCTYPE NETSCAPE-Bookmark-file-1>
+<!-- This is an automatically generated file.
      It will be read and overwritten.
-     DO NOT EDIT! -- >
-      <META HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=UTF-8">
-        <TITLE>Bookmarks</TITLE>
-        <H1>Bookmarks</H1>
-        <DL><p>
-          `;
+     DO NOT EDIT! -->
+<META HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=UTF-8">
+<TITLE>Bookmarks</TITLE>
+<H1>Bookmarks</H1>
+<DL><p>
+`;
       function traverseNode(node) {
         if (node.title === "" && !node.children) return; // Skip dummy roots if any
         if (node.url) {
           const addDate = node.dateAdded ? Math.floor(node.dateAdded / 1000) : 0;
-          htmlContent += `    <DT><A HREF="${node.url}" ADD_DATE="${addDate}">${escapeHtml(node.title)}</A>\n`;
+          htmlContent += `    <DT><A HREF="${escapeHtmlAttr(node.url)}" ADD_DATE="${addDate}">${escapeHtml(node.title)}</A>\n`;
         } else if (node.children) {
           const addDate = node.dateAdded ? Math.floor(node.dateAdded / 1000) : 0;
           const title = node.title || (node.id === '1' ? 'Bookmark Bar' : (node.id === '2' ? 'Other Bookmarks' : 'Folder'));

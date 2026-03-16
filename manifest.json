@@ -14,8 +14,6 @@
         "downloads"
     ],
     "host_permissions": [
-        "https://www.bing.com/*",
-        "https://cn.bing.com/*",
         "https://bing.ee123.net/*",
         "https://api.nasa.gov/*",
         "https://picsum.photos/*",

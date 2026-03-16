@@ -13,7 +13,7 @@
     bgImage: document.getElementById('bg-image'),
     bgOverlay: document.getElementById('bg-overlay'),
     copyright: document.getElementById('bg-copyright'),
-    // ----- 设置与收藏面板元素 -----
+        // ----- 设置与收藏面板元素 -----
     providerSelector: document.getElementById('provider-selector'),
     favBtn: document.getElementById('fav-btn'),
     refreshBtn: document.getElementById('refresh-btn'),
@@ -46,7 +46,7 @@
     }
   };
 
-  // 当前壁纸的元数据（用于收藏）
+    // 当前壁纸的元数据（用于收藏）
   let currentWallpaperData = null;
 
   // =============================
@@ -78,7 +78,7 @@
     }
   };
 
-  // 防重复历史记录管理器 (最近观看的壁纸 URL，防止连续刷出同样的图)
+    // 防重复历史记录管理器 (最近观看的壁纸 URL，防止连续刷出同样的图)
   const HistoryManager = {
     history: [],
     maxSize: 15,
@@ -116,7 +116,7 @@
   };
 
   const FavoritesManager = {
-    favorites: [], // 数组：{ id: string, url: string, copyright: string, provider: string }
+        favorites: [], // 数组：{ id: string, url: string, copyright: string, provider: string }
     async load() {
       this.favorites = await Storage.get(CONSTANTS.CACHE_KEYS.FAVORITES, []);
     },
@@ -164,7 +164,7 @@
   //  4. 壁纸提供者 (Providers)
   // =============================
   const WallpaperProviders = {
-    // Bing 日期偏移量（每次点击刷新 +1，往前回退一天）
+        // Bing 日期偏移量（每次点击刷新 +1，往前回退一天）
     _bingDateOffset: 0,
 
     // ---- 1. Bing 每日超清壁纸 (按日期倒序浏览) ----
@@ -200,7 +200,7 @@
       };
     },
 
-    // --- 简单的免费翻译接口辅助函数 (Google App Script 或直接调用公开接口) ---
+        // --- 简单的免费翻译接口辅助函数 (Google App Script 或直接调用公开接口) ---
     async _translate(text) {
       if (!text) return '';
       try {
@@ -261,7 +261,7 @@
       return '';
     },
 
-    // NASA 日期偏移量（与 Bing 同理）
+        // NASA 日期偏移量（与 Bing 同理）
     _nasaDateOffset: 0,
 
     // ---- 2. NASA 每日天文图 (按日期倒序浏览) ----
@@ -322,7 +322,7 @@
       // 获取屏幕分辨率
       const w = window.screen.width * window.devicePixelRatio;
       const h = window.screen.height * window.devicePixelRatio;
-      // 避免缓存，加个随机种子
+            // 避免缓存，加个随机种子
       const seed = Math.floor(Math.random() * 100000);
       const result = {
         url: `https://picsum.photos/seed/${seed}/${Math.round(w)}/${Math.round(h)}`,
@@ -384,7 +384,7 @@
       };
       img.onerror = () => {
         console.warn('[NewTab] 图片加载失败:', data.url);
-        fallbackToGradient();
+        fallbackToDefault();
       };
       img.src = data.url;
       updateCopyright(data.copyright);
@@ -419,6 +419,40 @@
       DOM.favBtn.classList.remove('active');
       DOM.favBtn.title = "收藏这张壁纸";
     }
+  }
+
+  function sanitizeStoryDetail(html) {
+    if (!html) return '';
+
+    const parser = new DOMParser();
+    const doc = parser.parseFromString(html, 'text/html');
+
+    doc.querySelectorAll('script, style, iframe, object, embed, link, meta').forEach(el => el.remove());
+
+    doc.querySelectorAll('*').forEach(el => {
+      Array.from(el.attributes).forEach(attr => {
+        const name = attr.name.toLowerCase();
+        if (name.startsWith('on')) {
+          el.removeAttribute(attr.name);
+          return;
+        }
+
+        if (name === 'href') {
+          const href = el.getAttribute('href') || '';
+          if (!/^https?:\/\//i.test(href)) {
+            el.removeAttribute('href');
+          } else {
+            el.setAttribute('target', '_blank');
+            el.setAttribute('rel', 'noopener noreferrer');
+          }
+          return;
+        }
+
+        el.removeAttribute(attr.name);
+      });
+    });
+
+    return doc.body.innerHTML;
   }
 
   // =============================
@@ -491,9 +525,6 @@
       FavoritesManager.load(),
       HistoryManager.load()
     ]);
-    // 清除旧缓存（确保 URL 格式更新生效）
-    await Storage.set(CONSTANTS.CACHE_KEYS.BING, null);
-
     // 开始渲染背景
     renderBackground();
 
@@ -542,7 +573,7 @@
       }
 
       DOM.storyTitle.textContent = fullTitle;
-      DOM.storyBody.innerHTML = detail; // imgdetail 本身是 HTML 格式
+      DOM.storyBody.innerHTML = sanitizeStoryDetail(detail);
       DOM.storyCard.classList.toggle('open');
     });
 
