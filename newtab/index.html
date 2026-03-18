@@ -4,7 +4,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>新标签页</title>
+  <title>New Tab</title>
   <link rel="icon" type="image/png" sizes="32x32" href="icons/icon32.png">
   <link rel="icon" type="image/png" sizes="16x16" href="icons/icon16.png">
   <link rel="stylesheet" href="style.css">
@@ -20,20 +20,20 @@
 
   <!-- 壁纸版权信息 -->
   <footer id="bg-credit">
-    <span id="bg-copyright" title="点击查看壁纸故事"></span>
+    <span id="bg-copyright" data-i18n-title="newtab.wallpaperStoryTitle" title="点击查看壁纸故事"></span>
   </footer>
 
   <!-- 故事卡片（全宽弹层，脱离 footer 以突破 z-index 限制） -->
   <div id="story-card" class="story-card">
     <div class="story-header">
       <span id="story-title" class="story-title"></span>
-      <button id="story-close" class="story-close" title="关闭">&times;</button>
+      <button id="story-close" class="story-close" data-i18n-title="common.close" title="关闭">&times;</button>
     </div>
     <div id="story-body" class="story-body"></div>
   </div>
 
   <!-- 收藏按钮 -->
-  <button id="fav-btn" class="floating-btn" title="收藏这张壁纸">
+  <button id="fav-btn" class="floating-btn" data-i18n-title="newtab.favoriteWallpaper" title="收藏这张壁纸">
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"
       stroke-linejoin="round">
       <path
@@ -45,7 +45,7 @@
   <!-- 刷新/图库 悬浮组 -->
   <div class="refresh-wrapper" id="refresh-wrapper">
     <!-- 刷新按钮 -->
-    <button id="refresh-btn" class="floating-btn" title="更新壁纸 (右键切换源)" aria-label="更新壁纸">
+    <button id="refresh-btn" class="floating-btn" data-i18n-title="newtab.refreshWallpaper" data-i18n-aria-label="newtab.refreshWallpaperAria" title="更新壁纸 (右键切换源)" aria-label="更新壁纸">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"
         stroke-linejoin="round">
         <polyline points="23 4 23 10 17 10"></polyline>
@@ -59,27 +59,28 @@
       <div class="radio-group" id="provider-selector">
         <label>
           <input type="radio" name="provider" value="bing">
-          <span style="flex: 1;">必应主页</span>
-          <button id="bing-today-btn" type="button" class="action-btn" title="回到今天的壁纸">今天</button>
+          <span style="flex: 1;" data-i18n="newtab.providers.bing">必应主页</span>
+          <button id="bing-today-btn" type="button" class="action-btn" data-i18n="newtab.today" data-i18n-title="newtab.today" title="Today">今天</button>
         </label>
         <label>
           <input type="radio" name="provider" value="nasa">
-          <span style="flex: 1;">NASA天文</span>
-          <button id="nasa-today-btn" type="button" class="action-btn" title="回到今天的天文图">今天</button>
+          <span style="flex: 1;" data-i18n="newtab.providers.nasa">NASA天文</span>
+          <button id="nasa-today-btn" type="button" class="action-btn" data-i18n="newtab.today" data-i18n-title="newtab.today" title="Today">今天</button>
         </label>
         <label>
           <input type="radio" name="provider" value="picsum">
-          <span>无尽随机</span>
+          <span data-i18n="newtab.providers.picsum">无尽随机</span>
         </label>
         <label>
           <input type="radio" name="provider" value="favorites">
-          <span style="flex: 1;">我的收藏</span>
-          <button id="clear-favorites-btn" type="button" class="action-btn" title="清空所有收藏">清空</button>
+          <span style="flex: 1;" data-i18n="newtab.providers.favorites">我的收藏</span>
+          <button id="clear-favorites-btn" type="button" class="action-btn" data-i18n="newtab.clearFavorites" data-i18n-title="newtab.clearFavorites" title="Clear">清空</button>
         </label>
       </div>
     </div>
   </div>
 
+  <script src="../shared/i18n.js"></script>
   <script src="script.js"></script>
 </body>
 

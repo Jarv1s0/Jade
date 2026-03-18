@@ -1,4 +1,16 @@
 document.addEventListener('DOMContentLoaded', function () {
+  const i18n = window.JadeI18n || null;
+  const t = (key, params, fallback) => (
+    i18n && typeof i18n.t === 'function'
+      ? i18n.t(key, params, fallback)
+      : (fallback || key)
+  );
+
+  if (i18n && typeof i18n.apply === 'function') {
+    i18n.apply(document);
+    i18n.setDocumentTitle('popup.pageTitle', null, 'Jade Bookmark Launcher');
+  }
+
   // 元素引用
   const searchInput = document.getElementById('searchInput');
   const shortcutHint = document.getElementById('shortcutHint');
@@ -70,6 +82,8 @@ document.addEventListener('DOMContentLoaded', function () {
   let targetNodeId = null;
   let targetNodeIsFolder = false;
   let targetNodeDomain = null; // New for history items
+  let targetNodePinKey = null;
+  let targetFrequentKey = null;
   let targetFrequentUrl = null; // 常用卡片当前 URL
   let pinnedIds = new Set();
   let frequentOrder = []; // 用户自定义的常用访问排序
@@ -92,11 +106,332 @@ document.addEventListener('DOMContentLoaded', function () {
     data: null,
     inFlight: null
   };
+  const PINNED_PREF_KEYS = ['pinned_bookmarks', 'frequent_order'];
+  const CUSTOM_PREF_KEYS = ['frequent_custom_titles', 'frequent_custom_urls'];
+  const preferenceStorageArea = chrome.storage.sync || chrome.storage.local;
   const DEAD_LINK_CACHE_KEY = 'dead_link_probe_cache_v1';
   const DEAD_LINK_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
   const DEAD_LINK_CACHE_MAX_ENTRIES = 4000;
+  const extensionNewTabUrl = chrome.runtime.getURL('newtab/index.html');
+  const reusableNewTabUrls = [
+    extensionNewTabUrl,
+    'chrome://newtab/',
+    'chrome://newtab',
+    'chrome-search://local-ntp/local-ntp.html',
+    'edge://newtab/',
+    'edge://newtab',
+    'about:newtab'
+  ];
   let deadLinkProbeCache = {};
   let deadLinkCachePersistTimer = null;
+
+  function getCurrentFolderPathTitles() {
+    return navigationStack.slice(1).map(item => item.title || '').filter(Boolean);
+  }
+
+  function normalizeUrlForPin(url) {
+    if (typeof url !== 'string') return '';
+    const raw = url.trim();
+    if (!raw) return '';
+
+    try {
+      const parsed = new URL(raw);
+      parsed.hash = '';
+      if ((parsed.protocol === 'http:' && parsed.port === '80')
+        || (parsed.protocol === 'https:' && parsed.port === '443')) {
+        parsed.port = '';
+      }
+      return parsed.toString();
+    } catch (_) {
+      return raw;
+    }
+  }
+
+  function normalizeFolderSegment(value) {
+    return String(value || '')
+      .trim()
+      .replace(/\s+/g, ' ')
+      .toLowerCase();
+  }
+
+  function getBookmarkPinKey(url) {
+    const normalized = normalizeUrlForPin(url);
+    return normalized ? `url:${normalized}` : '';
+  }
+
+  function getFolderPinKey(pathTitles) {
+    const normalized = (pathTitles || [])
+      .map(normalizeFolderSegment)
+      .filter(Boolean);
+    return normalized.length > 0 ? `folder:${normalized.join('/')}` : '';
+  }
+
+  function getNodePinKey(node, parentPathTitles = []) {
+    if (!node || node.id === '0') return '';
+    if (node.url) return getBookmarkPinKey(node.url);
+    return getFolderPinKey(parentPathTitles.concat(node.title || ''));
+  }
+
+  function getItemPinKey(item, parentPathTitles = []) {
+    if (!item || typeof item !== 'object') return '';
+    if (item.pinKey) return item.pinKey;
+    if (item.url) return getBookmarkPinKey(item.url);
+    return getFolderPinKey(parentPathTitles.concat(item.title || ''));
+  }
+
+  function isStablePinKey(value) {
+    return typeof value === 'string'
+      && (value.startsWith('url:') || value.startsWith('folder:'));
+  }
+
+  function buildPinMaps(tree) {
+    const idToPinKey = new Map();
+    const nodeByPinKey = new Map();
+
+    function walk(nodes, parentPathTitles = []) {
+      (nodes || []).forEach((node) => {
+        if (!node) return;
+
+        const pinKey = getNodePinKey(node, parentPathTitles);
+        if (node.id !== '0' && pinKey) {
+          idToPinKey.set(node.id, pinKey);
+          if (!nodeByPinKey.has(pinKey)) {
+            nodeByPinKey.set(pinKey, node);
+          }
+        }
+
+        if (Array.isArray(node.children) && node.children.length > 0) {
+          const nextPath = node.id === '0'
+            ? parentPathTitles
+            : parentPathTitles.concat(node.title || '');
+          walk(node.children, nextPath);
+        }
+      });
+    }
+
+    walk(Array.isArray(tree) ? tree : []);
+    return { idToPinKey, nodeByPinKey };
+  }
+
+  function migrateStoredPinList(list, idToPinKey) {
+    const migrated = [];
+    const seen = new Set();
+    let changed = false;
+
+    (Array.isArray(list) ? list : []).forEach((entry) => {
+      let stableKey = '';
+      if (isStablePinKey(entry)) {
+        stableKey = entry;
+      } else if (idToPinKey.has(String(entry))) {
+        stableKey = idToPinKey.get(String(entry));
+        changed = true;
+      } else {
+        changed = true;
+      }
+
+      if (!stableKey || seen.has(stableKey)) return;
+      seen.add(stableKey);
+      migrated.push(stableKey);
+    });
+
+    return { value: migrated, changed };
+  }
+
+  function loadPinnedPreferences(callback) {
+    if (preferenceStorageArea === chrome.storage.local) {
+      chrome.storage.local.get(PINNED_PREF_KEYS, (res) => callback(res || {}, false));
+      return;
+    }
+
+    preferenceStorageArea.get(PINNED_PREF_KEYS, (syncRes) => {
+      const hasSyncData = PINNED_PREF_KEYS.some((key) => syncRes && syncRes[key] !== undefined);
+      if (hasSyncData) {
+        callback(syncRes || {}, false);
+        return;
+      }
+
+      chrome.storage.local.get(PINNED_PREF_KEYS, (localRes) => callback(localRes || {}, true));
+    });
+  }
+
+  function savePinnedPreferences(updates, callback) {
+    const done = () => {
+      if (typeof callback === 'function') callback();
+    };
+
+    if (preferenceStorageArea !== chrome.storage.local) {
+      preferenceStorageArea.set(updates, () => {
+        chrome.storage.local.set(updates, done);
+      });
+      return;
+    }
+
+    chrome.storage.local.set(updates, done);
+  }
+
+  function loadCustomPreferences(callback) {
+    if (preferenceStorageArea === chrome.storage.local) {
+      chrome.storage.local.get(CUSTOM_PREF_KEYS, (res) => callback(res || {}, false));
+      return;
+    }
+
+    preferenceStorageArea.get(CUSTOM_PREF_KEYS, (syncRes) => {
+      const hasSyncData = CUSTOM_PREF_KEYS.some((key) => syncRes && syncRes[key] !== undefined);
+      if (hasSyncData) {
+        callback(syncRes || {}, false);
+        return;
+      }
+
+      chrome.storage.local.get(CUSTOM_PREF_KEYS, (localRes) => callback(localRes || {}, true));
+    });
+  }
+
+  function saveCustomPreferences(updates, callback) {
+    const done = () => {
+      if (typeof callback === 'function') callback();
+    };
+
+    if (preferenceStorageArea !== chrome.storage.local) {
+      preferenceStorageArea.set(updates, () => {
+        chrome.storage.local.set(updates, done);
+      });
+      return;
+    }
+
+    chrome.storage.local.set(updates, done);
+  }
+
+  function migrateCustomPreferenceMap(map, tree) {
+    const source = (map && typeof map === 'object') ? map : {};
+    const migrated = {};
+    const seenLegacyKeys = new Set();
+    let changed = false;
+
+    function walk(nodes, parentPathTitles = []) {
+      (nodes || []).forEach((node) => {
+        if (!node || node.id === '0') return;
+
+        const stableKey = getNodePinKey(node, parentPathTitles);
+        const legacyDomainKey = node.url ? (() => {
+          try {
+            return new URL(node.url).hostname;
+          } catch (_) {
+            return '';
+          }
+        })() : '';
+
+        if (stableKey && Object.prototype.hasOwnProperty.call(source, stableKey)) {
+          migrated[stableKey] = source[stableKey];
+        } else if (legacyDomainKey && Object.prototype.hasOwnProperty.call(source, legacyDomainKey)) {
+          migrated[stableKey] = source[legacyDomainKey];
+          seenLegacyKeys.add(legacyDomainKey);
+          changed = true;
+        }
+
+        if (Array.isArray(node.children) && node.children.length > 0) {
+          walk(node.children, parentPathTitles.concat(node.title || ''));
+        }
+      });
+    }
+
+    walk(Array.isArray(tree) ? tree : []);
+
+    Object.keys(source).forEach((key) => {
+      if (Object.prototype.hasOwnProperty.call(migrated, key)) return;
+      if (seenLegacyKeys.has(key)) return;
+      if (!isStablePinKey(key)) {
+        changed = true;
+        return;
+      }
+      migrated[key] = source[key];
+    });
+
+    const sourceKeys = Object.keys(source);
+    const migratedKeys = Object.keys(migrated);
+    if (!changed && sourceKeys.length !== migratedKeys.length) {
+      changed = true;
+    }
+
+    return { value: migrated, changed };
+  }
+
+  function isReusableNewTabUrl(url) {
+    if (typeof url !== 'string' || !url) return false;
+
+    return reusableNewTabUrls.some(candidate => (
+      url === candidate
+      || url.startsWith(`${candidate}?`)
+      || url.startsWith(`${candidate}#`)
+    ));
+  }
+
+  function isReusableNewTab(tab) {
+    if (!tab || typeof tab !== 'object') return false;
+
+    if (isReusableNewTabUrl(tab.url) || isReusableNewTabUrl(tab.pendingUrl)) {
+      return true;
+    }
+
+    return tab.title === t('newtab.pageTitle', null, 'New Tab');
+  }
+
+  function getActiveTabAsync() {
+    return new Promise(resolve => {
+      chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+        if (chrome.runtime.lastError) {
+          resolve(null);
+          return;
+        }
+        resolve(tabs && tabs[0] ? tabs[0] : null);
+      });
+    });
+  }
+
+  function updateTabAsync(tabId, updateProperties) {
+    return new Promise((resolve, reject) => {
+      chrome.tabs.update(tabId, updateProperties, (tab) => {
+        if (chrome.runtime.lastError) {
+          reject(new Error(chrome.runtime.lastError.message));
+          return;
+        }
+        resolve(tab);
+      });
+    });
+  }
+
+  function createTabAsync(createProperties) {
+    return new Promise((resolve, reject) => {
+      chrome.tabs.create(createProperties, (tab) => {
+        if (chrome.runtime.lastError) {
+          reject(new Error(chrome.runtime.lastError.message));
+          return;
+        }
+        resolve(tab);
+      });
+    });
+  }
+
+  async function openBookmarkUrl(url, { active = true } = {}) {
+    if (!url) return;
+
+    if (!active) {
+      await createTabAsync({ url, active: false });
+      return;
+    }
+
+    const activeTab = await getActiveTabAsync();
+
+    if (activeTab && typeof activeTab.id === 'number' && isReusableNewTab(activeTab)) {
+      try {
+        await updateTabAsync(activeTab.id, { url, active: true });
+        return;
+      } catch (error) {
+        console.warn('[Jade] Failed to reuse new tab, falling back to a new tab.', error);
+      }
+    }
+
+    await createTabAsync({ url, active: true });
+  }
 
   function pruneDeadLinkProbeCache() {
     const now = Date.now();
@@ -183,7 +518,7 @@ document.addEventListener('DOMContentLoaded', function () {
     const request = new Promise((resolve) => {
       chrome.bookmarks.getTree((tree) => {
         if (chrome.runtime.lastError) {
-          console.warn('[Jade] 获取书签树失败:', chrome.runtime.lastError.message);
+          console.warn('[Jade] Failed to get bookmark tree:', chrome.runtime.lastError.message);
           resolve([]);
           return;
         }
@@ -223,7 +558,9 @@ document.addEventListener('DOMContentLoaded', function () {
   // 检测操作系统以显示快捷键提示
   const isMac = navigator.platform.toUpperCase().indexOf('MAC') >= 0;
   if (shortcutHint) {
-    shortcutHint.textContent = isMac ? '⌘K' : 'Ctrl K';
+    shortcutHint.textContent = isMac
+      ? t('popup.shortcutMac', null, '⌘K')
+      : t('popup.shortcutWin', null, 'Ctrl K');
   }
 
   // --- 初始化 ---
@@ -232,41 +569,58 @@ document.addEventListener('DOMContentLoaded', function () {
   function init() {
     setupBookmarkCacheInvalidation();
 
-    // 载入置顶、黑名单、排序和自定义标题，然后构建首页
-    chrome.storage.local.get(
-      ['pinned_bookmarks', 'frequent_order', 'frequent_custom_titles', 'frequent_custom_urls', 'hidden_recent_urls', DEAD_LINK_CACHE_KEY],
-      (res) => {
-      if (res.pinned_bookmarks) {
-        pinnedIds = new Set(res.pinned_bookmarks);
-      }
-      if (res.frequent_order) {
-        frequentOrder = res.frequent_order;
-      }
-      if (res.frequent_custom_titles) {
-        frequentCustomTitles = res.frequent_custom_titles;
-      }
-      if (res.frequent_custom_urls) {
-        frequentCustomUrls = res.frequent_custom_urls;
-      }
-      if (res.hidden_recent_urls) {
-        hiddenRecentUrls = res.hidden_recent_urls;
-      }
-      if (res[DEAD_LINK_CACHE_KEY] && typeof res[DEAD_LINK_CACHE_KEY] === 'object') {
-        deadLinkProbeCache = res[DEAD_LINK_CACHE_KEY];
-        pruneDeadLinkProbeCache();
-        schedulePersistDeadLinkProbeCache(800);
-      }
+    loadPinnedPreferences((pinRes, shouldBackfillSync) => {
+      loadCustomPreferences((customRes, shouldBackfillCustomSync) => {
+        chrome.storage.local.get(
+          ['hidden_recent_urls', DEAD_LINK_CACHE_KEY],
+          (res) => {
+            if (res.hidden_recent_urls) {
+              hiddenRecentUrls = res.hidden_recent_urls;
+            }
+            if (res[DEAD_LINK_CACHE_KEY] && typeof res[DEAD_LINK_CACHE_KEY] === 'object') {
+              deadLinkProbeCache = res[DEAD_LINK_CACHE_KEY];
+              pruneDeadLinkProbeCache();
+              schedulePersistDeadLinkProbeCache(800);
+            }
 
-      chrome.bookmarks.get('1', (nodes) => {
-        if (nodes && nodes.length > 0) {
-          const bookmarkBar = nodes[0];
-          navigationStack = [{ id: bookmarkBar.id, title: bookmarkBar.title || '书签栏' }];
-          // Start by building the dashboard (Home view)
-          buildDashboard();
-        }
+            getBookmarkTreeCached((tree) => {
+              const { idToPinKey } = buildPinMaps(tree);
+              const migratedPinned = migrateStoredPinList(pinRes.pinned_bookmarks, idToPinKey);
+              const migratedOrder = migrateStoredPinList(pinRes.frequent_order, idToPinKey);
+              const migratedCustomTitles = migrateCustomPreferenceMap(customRes.frequent_custom_titles, tree);
+              const migratedCustomUrls = migrateCustomPreferenceMap(customRes.frequent_custom_urls, tree);
+
+              pinnedIds = new Set(migratedPinned.value);
+              frequentOrder = migratedOrder.value;
+              frequentCustomTitles = migratedCustomTitles.value;
+              frequentCustomUrls = migratedCustomUrls.value;
+
+              if (shouldBackfillSync || migratedPinned.changed || migratedOrder.changed) {
+                savePinnedPreferences({
+                  pinned_bookmarks: Array.from(pinnedIds),
+                  frequent_order: frequentOrder
+                });
+              }
+
+              if (shouldBackfillCustomSync || migratedCustomTitles.changed || migratedCustomUrls.changed) {
+                saveCustomPreferences({
+                  frequent_custom_titles: frequentCustomTitles,
+                  frequent_custom_urls: frequentCustomUrls
+                });
+              }
+
+              chrome.bookmarks.get('1', (nodes) => {
+                if (nodes && nodes.length > 0) {
+                  const bookmarkBar = nodes[0];
+                  navigationStack = [{ id: bookmarkBar.id, title: bookmarkBar.title || t('popup.bookmarkBar', null, 'Bookmark Bar') }];
+                  buildDashboard();
+                }
+              });
+            });
+          }
+        );
       });
-      }
-    );
+    });
 
     setupGlobalListeners();
   }
@@ -368,7 +722,7 @@ document.addEventListener('DOMContentLoaded', function () {
             <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
               <path d="M16 12V4h1V2H7v2h1v8l-2 2v2h5.2v6h1.6v-6H18v-2l-2-2z"/>
             </svg>
-            <div>将你最常访问的网站添加到这里<br>最多 8 个，仅由你手动管理。</div>
+            <div>${t('popup.emptyPinned', null, 'Add your most visited sites here.<br>Up to 8 items, managed manually by you.')}</div>
           </div>
         `;
         return;
@@ -389,8 +743,8 @@ document.addEventListener('DOMContentLoaded', function () {
           try { domain = new URL(item.url || 'about:blank').hostname; } catch (e) { domain = 'unknown'; }
         }
 
-        const itemKey = item.id || domain;
-        let shortName = frequentCustomTitles[itemKey] || item.title || domain || '未命名文件夹';
+        const itemKey = item.pinKey || item.id || domain;
+        let shortName = frequentCustomTitles[itemKey] || item.title || domain || t('common.untitledFolder', null, 'Untitled folder');
         shortName = shortName.split(' - ')[0].split(' | ')[0].split(' _ ')[0].trim();
         if (shortName.length > 10) shortName = shortName.substring(0, 10) + '..';
 
@@ -402,7 +756,7 @@ document.addEventListener('DOMContentLoaded', function () {
                   class="frequent-favicon">`;
 
         a.innerHTML = `
-              <div class="frequent-actions" title="取消置顶">
+              <div class="frequent-actions" title="${escapeHtmlAttr(t('popup.pinCardTitle', null, 'Unpin'))}">
                   <svg class="pin-indicator-icon" width="12" height="12" viewBox="0 0 24 24" fill="var(--accent-color)" stroke="var(--accent-color)" stroke-width="2.5"><path d="M16 12V4h1V2H7v2h1v8l-2 2v2h5.2v6h1.6v-6H18v-2l-2-2z"/></svg>
               </div>
               <div class="frequent-icon-wrap">
@@ -421,7 +775,7 @@ document.addEventListener('DOMContentLoaded', function () {
           if (isFolder) {
             enterFolder(item.id, item.title, item.isUncategorized);
           } else {
-            chrome.tabs.create({ url: frequentCustomUrls[itemKey] || item.url });
+            void openBookmarkUrl(frequentCustomUrls[itemKey] || item.url);
           }
         };
 
@@ -449,7 +803,7 @@ document.addEventListener('DOMContentLoaded', function () {
             }, 100);
           }
 
-          const targetId = item.id || domain;
+          const targetId = item.pinKey || item.id || domain;
           setTimeout(() => {
             if (pinnedIds.has(targetId)) {
               removeFromPinnedWithUndo(targetId, itemIndex);
@@ -488,8 +842,8 @@ document.addEventListener('DOMContentLoaded', function () {
           const movedItem = currentFrequentItems.splice(fromIndex, 1)[0];
           currentFrequentItems.splice(toIndex, 0, movedItem);
 
-          frequentOrder = currentFrequentItems.map(it => it.id || it.domain || '');
-          chrome.storage.local.set({ frequent_order: frequentOrder });
+          frequentOrder = currentFrequentItems.map(it => it.pinKey || it.id || it.domain || '');
+          savePinnedPreferences({ frequent_order: frequentOrder });
 
           renderData(currentFrequentItems);
         });
@@ -503,6 +857,8 @@ document.addEventListener('DOMContentLoaded', function () {
         a.addEventListener('contextmenu', (e) => {
           e.preventDefault();
           targetNodeId = item.id || null;
+          targetNodePinKey = item.pinKey || getItemPinKey(item);
+          targetFrequentKey = item.pinKey || getItemPinKey(item);
           targetNodeDomain = domain;
           targetFrequentUrl = item.url || '';
           targetNodeIsFolder = false;
@@ -515,27 +871,33 @@ document.addEventListener('DOMContentLoaded', function () {
 
     getBookmarkTreeCached((tree) => {
       let pinnedNodes = [];
-      function traverse(nodes) {
+      function traverse(nodes, parentPathTitles = []) {
         nodes.forEach(n => {
-          if (pinnedIds.has(n.id)) pinnedNodes.push(n);
-          if (n.children) traverse(n.children);
+          const pinKey = getNodePinKey(n, parentPathTitles);
+          const nextPath = n.id === '0'
+            ? parentPathTitles
+            : parentPathTitles.concat(n.title || '');
+          if (pinKey && pinnedIds.has(pinKey)) {
+            pinnedNodes.push({ ...n, pinKey });
+          }
+          if (n.children) traverse(n.children, nextPath);
         });
       }
       traverse(tree);
 
-      // 清理幽灵 ID：pinnedIds 中存在但书签树中找不到的无效 ID
-      const foundIds = new Set(pinnedNodes.map(n => n.id));
+      // 清理已经无法在书签树中解析的置顶键
+      const foundIds = new Set(pinnedNodes.map(n => n.pinKey));
       const orphanIds = Array.from(pinnedIds).filter(id => !foundIds.has(id));
       if (orphanIds.length > 0) {
         orphanIds.forEach(id => pinnedIds.delete(id));
-        chrome.storage.local.set({ pinned_bookmarks: Array.from(pinnedIds) });
+        savePinnedPreferences({ pinned_bookmarks: Array.from(pinnedIds) });
         console.info(`[Jade] 已清理 ${orphanIds.length} 个无效置顶 ID:`, orphanIds);
       }
 
       const pinnedOrder = Array.from(pinnedIds);
       pinnedNodes.sort((a, b) => {
-        const idA = a.id;
-        const idB = b.id;
+        const idA = a.pinKey;
+        const idB = b.pinKey;
         const indexA = pinnedOrder.indexOf(idA);
         const indexB = pinnedOrder.indexOf(idB);
         return indexA - indexB;
@@ -545,8 +907,8 @@ document.addEventListener('DOMContentLoaded', function () {
 
       // 应用用户自定义的排序 (frequentOrder)
       finalItems.sort((a, b) => {
-        const idA = a.id;
-        const idB = b.id;
+        const idA = a.pinKey;
+        const idB = b.pinKey;
         const indexA = frequentOrder.indexOf(idA);
         const indexB = frequentOrder.indexOf(idB);
 
@@ -573,7 +935,7 @@ document.addEventListener('DOMContentLoaded', function () {
             recentItems.push({
               title: session.tab.title,
               url: session.tab.url,
-              type: '最近关闭',
+              type: t('popup.recentClosed', null, 'Recently Closed'),
               timestamp: session.lastModified
             });
           }
@@ -586,7 +948,7 @@ document.addEventListener('DOMContentLoaded', function () {
           title: hi.title || hi.url,
           url: hi.url,
           id: hi.id,
-          type: '历史记录',
+          type: t('popup.history', null, 'History'),
           timestamp: hi.lastVisitTime
         }));
 
@@ -599,7 +961,7 @@ document.addEventListener('DOMContentLoaded', function () {
         if (combined.length === 0) {
           recentListView.innerHTML = `
             <div class="empty-state">
-              暂无最近访问记录
+              ${t('popup.noRecentVisits', null, 'No recent visits yet')}
             </div>
           `;
           return;
@@ -614,6 +976,8 @@ document.addEventListener('DOMContentLoaded', function () {
           a.addEventListener('contextmenu', (e) => {
             e.preventDefault();
             targetNodeDomain = item.url; // 借用 domain 存储 url 或 id 以供后续移除动作
+            targetNodePinKey = null;
+            targetFrequentKey = null;
             showContextMenu(e, false, false, true);
           });
 
@@ -625,7 +989,7 @@ document.addEventListener('DOMContentLoaded', function () {
           }
 
           const timeAgo = getTimeAgo(item.timestamp || Date.now());
-          const metaInfo = item.type === '历史记录' ? timeAgo : `${item.type} · ${timeAgo}`;
+          const metaInfo = item.type === t('popup.history', null, 'History') ? timeAgo : `${item.type} · ${timeAgo}`;
 
           a.innerHTML = `
                 <div class="recent-favicon">
@@ -643,7 +1007,7 @@ document.addEventListener('DOMContentLoaded', function () {
 
           a.onclick = (e) => {
             e.preventDefault();
-            chrome.tabs.create({ url: item.url });
+            void openBookmarkUrl(item.url);
           };
 
           recentListView.appendChild(a);
@@ -666,7 +1030,7 @@ document.addEventListener('DOMContentLoaded', function () {
           rootNode.children.forEach(child => {
             if (child.url) {
               // 记录根目录下的直属书签
-              rootBookmarks.push({ ...child, parentTitle: rootNode.title || '根目录' });
+              rootBookmarks.push({ ...child, parentTitle: rootNode.title || t('popup.rootFolder', null, 'Root') });
             } else {
               folders.push(child);
             }
@@ -693,7 +1057,7 @@ document.addEventListener('DOMContentLoaded', function () {
       if (rootBookmarks.length > 0) {
         const virtualFolder = {
           id: '1', // 默认跳转到书签栏 (ID 1)
-          title: '未分类书签',
+          title: t('popup.uncategorizedBookmarks', null, 'Uncategorized Bookmarks'),
           isUncategorized: true, // 增加专属标记
           children: rootBookmarks
         };
@@ -746,6 +1110,8 @@ document.addEventListener('DOMContentLoaded', function () {
       e.preventDefault();
       targetNodeId = folder.id;
       targetNodeIsFolder = true;
+      targetNodePinKey = getItemPinKey(folder);
+      targetFrequentKey = null;
       showContextMenu(e, true);
     });
 
@@ -756,15 +1122,15 @@ document.addEventListener('DOMContentLoaded', function () {
     if (dashboardModule && typeof dashboardModule.getTimeAgo === 'function') {
       return dashboardModule.getTimeAgo(timestamp);
     }
-    if (!timestamp) return '未知时间';
+    if (!timestamp) return t('common.unknownTime', null, 'Unknown time');
     let ts = timestamp;
     if (ts < 10000000000) ts *= 1000;
 
     const diff = Date.now() - ts;
     const mins = Math.floor(diff / 60000);
 
-    if (mins < 1) return '刚刚';
-    if (mins < 60) return `${mins} 分钟前`;
+    if (mins < 1) return t('common.justNow', null, 'Just now');
+    if (mins < 60) return t('common.minutesAgo', { count: mins }, `${mins} min ago`);
 
     const date = new Date(ts);
     const today = new Date();
@@ -783,10 +1149,10 @@ document.addEventListener('DOMContentLoaded', function () {
     const hh = date.getHours().toString().padStart(2, '0');
     const mm = date.getMinutes().toString().padStart(2, '0');
 
-    if (isToday) return `今天 ${hh}:${mm}`;
-    if (isYesterday) return `昨天 ${hh}:${mm}`;
+    if (isToday) return t('common.todayTime', { time: `${hh}:${mm}` }, `Today ${hh}:${mm}`);
+    if (isYesterday) return t('common.yesterdayTime', { time: `${hh}:${mm}` }, `Yesterday ${hh}:${mm}`);
 
-    return `${date.getMonth() + 1}月${date.getDate()}日`;
+    return t('common.monthDay', { month: date.getMonth() + 1, day: date.getDate() }, `${date.getMonth() + 1}/${date.getDate()}`);
   }
 
   // --- 标准文件夹导航 ---
@@ -816,7 +1182,7 @@ document.addEventListener('DOMContentLoaded', function () {
           if (rootNode.children) {
             rootNode.children.forEach(child => {
               if (child.url) {
-                rootBookmarks.push({ ...child, parentTitle: rootNode.title || '根目录' });
+                rootBookmarks.push({ ...child, parentTitle: rootNode.title || t('popup.rootFolder', null, 'Root') });
               }
             });
           }
@@ -839,11 +1205,11 @@ document.addEventListener('DOMContentLoaded', function () {
     if (searchQuery) {
       breadcrumb.style.display = 'flex';
       const span = document.createElement('span');
-      span.textContent = `搜索: "${searchQuery}"`;
+      span.textContent = t('popup.searchResultLabel', { query: searchQuery }, `Search: "${searchQuery}"`);
       breadcrumb.appendChild(span);
 
       const clearBtn = document.createElement('span');
-      clearBtn.textContent = '清除';
+      clearBtn.textContent = t('popup.clearSearch', null, 'Clear');
       clearBtn.style.marginLeft = 'auto';
       clearBtn.style.color = 'var(--accent-color)';
       clearBtn.onclick = clearSearch;
@@ -858,7 +1224,7 @@ document.addEventListener('DOMContentLoaded', function () {
     }
 
     const backBtn = document.createElement('span');
-    backBtn.innerHTML = `<svg class="inline-back-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="15 18 9 12 15 6"></polyline></svg> 返回`;
+    backBtn.innerHTML = `<svg class="inline-back-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="15 18 9 12 15 6"></polyline></svg> ${escapeHtml(t('popup.backButton', null, 'Back'))}`;
 
     // 允许拖放到“返回”按钮上 (移动到上一级)
     const parentNode = navigationStack.length > 1 ? navigationStack[navigationStack.length - 2] : null; // 上一级目录 (或 undefined 当返回首页时不支持)
@@ -955,11 +1321,11 @@ document.addEventListener('DOMContentLoaded', function () {
             const recentTabs = [];
             sessions.forEach(session => {
               if (session.tab && session.tab.title.toLowerCase().includes(query.toLowerCase())) {
-                recentTabs.push({ title: session.tab.title, url: session.tab.url, meta: '[最近关闭]' });
+                recentTabs.push({ title: session.tab.title, url: session.tab.url, meta: t('popup.sessionsMeta', null, '[Recently Closed]') });
               } else if (session.window && session.window.tabs) {
-                session.window.tabs.forEach(t => {
-                  if (t.title.toLowerCase().includes(query.toLowerCase())) {
-                    recentTabs.push({ title: t.title, url: t.url, meta: '[最近关闭 window]' });
+                session.window.tabs.forEach((tabItem) => {
+                  if (tabItem.title.toLowerCase().includes(query.toLowerCase())) {
+                    recentTabs.push({ title: tabItem.title, url: tabItem.url, meta: t('popup.sessionWindowMeta', null, '[Recently Closed Window]') });
                   }
                 });
               }
@@ -989,7 +1355,7 @@ document.addEventListener('DOMContentLoaded', function () {
     bookmarkList.innerHTML = '';
 
     if (items.length === 0) {
-      bookmarkList.innerHTML = `<div class="empty-state">${isSearchResult ? '未找到相关内容' : '此文件夹为空'}</div>`;
+      bookmarkList.innerHTML = `<div class="empty-state">${isSearchResult ? t('popup.emptySearch', null, 'No matches found') : t('popup.emptyFolder', null, 'This folder is empty')}</div>`;
       return;
     }
 
@@ -1017,7 +1383,9 @@ document.addEventListener('DOMContentLoaded', function () {
                  onerror="this.src='https://www.google.com/s2/favicons?domain=${domain}&sz=64'">
            </div>`;
 
-      const displayTitle = item.title || (isFolder ? '未命名文件夹' : '无标题');
+      const displayTitle = item.title || (isFolder
+        ? t('common.untitledFolder', null, 'Untitled folder')
+        : t('common.untitled', null, 'Untitled'));
       const titleHtml = isSearchResult
         ? highlightText(displayTitle, searchInput.value.trim())
         : escapeHtml(displayTitle);
@@ -1037,7 +1405,7 @@ document.addEventListener('DOMContentLoaded', function () {
         if (isFolder) {
           enterFolder(item.id, item.title);
         } else {
-          chrome.tabs.create({ url: item.url });
+          void openBookmarkUrl(item.url);
         }
       };
 
@@ -1046,7 +1414,7 @@ document.addEventListener('DOMContentLoaded', function () {
         if (e.key === 'Enter') {
           if (e.metaKey || e.ctrlKey) {
             // Open in background tab
-            if (!isFolder) chrome.tabs.create({ url: item.url, active: false });
+            if (!isFolder) void openBookmarkUrl(item.url, { active: false });
           } else {
             a.click();
           }
@@ -1059,6 +1427,8 @@ document.addEventListener('DOMContentLoaded', function () {
         e.preventDefault();
         targetNodeId = item.id;
         targetNodeIsFolder = isFolder;
+        targetNodePinKey = getItemPinKey(item, getCurrentFolderPathTitles());
+        targetFrequentKey = null;
         showContextMenu(e, isFolder);
       });
 
@@ -1190,9 +1560,9 @@ document.addEventListener('DOMContentLoaded', function () {
 
   function confirmDangerAction(message, options = {}) {
     const {
-      title = '确认危险操作',
-      hint = '此操作不可撤销，是否继续？',
-      okText = '继续',
+      title = t('popup.confirm.defaultTitle', null, 'Confirm Action'),
+      hint = t('popup.confirm.defaultHint', null, 'This action cannot be undone. Continue?'),
+      okText = t('common.continue', null, 'Continue'),
       variant = 'danger'
     } = options;
 
@@ -1256,17 +1626,17 @@ document.addEventListener('DOMContentLoaded', function () {
   }
 
   function getBrokenProbeReasonLabel(probe) {
-    if (!probe) return '未知原因';
-    if (probe.reason === 'http_404') return 'HTTP 404（页面不存在）';
-    if (probe.reason === 'http_410') return 'HTTP 410（资源已删除）';
-    if (probe.reason === 'http_451') return 'HTTP 451（受法律限制）';
-    if (probe.reason === 'network_failure') return '网络连接失败';
-    if (probe.reason === 'timeout') return '请求超时';
-    if (probe.reason === 'head_blocked') return 'HEAD 请求受限';
-    if (probe.reason === 'head_inconclusive') return 'HEAD 返回非确定状态';
-    if (probe.reason === 'opaque_get') return '仅 no-cors 可访问（待复核）';
+    if (!probe) return t('popup.reasons.unknown', null, 'Unknown reason');
+    if (probe.reason === 'http_404') return t('popup.reasons.http404', null, 'HTTP 404 (Not Found)');
+    if (probe.reason === 'http_410') return t('popup.reasons.http410', null, 'HTTP 410 (Gone)');
+    if (probe.reason === 'http_451') return t('popup.reasons.http451', null, 'HTTP 451 (Unavailable for Legal Reasons)');
+    if (probe.reason === 'network_failure') return t('popup.reasons.networkFailure', null, 'Network request failed');
+    if (probe.reason === 'timeout') return t('popup.reasons.timeout', null, 'Request timed out');
+    if (probe.reason === 'head_blocked') return t('popup.reasons.headBlocked', null, 'HEAD request blocked');
+    if (probe.reason === 'head_inconclusive') return t('popup.reasons.headInconclusive', null, 'HEAD result was inconclusive');
+    if (probe.reason === 'opaque_get') return t('popup.reasons.opaqueGet', null, 'Reachable only with no-cors (needs review)');
     if (probe.reason && probe.reason.startsWith('http_')) return `HTTP ${probe.reason.replace('http_', '')}`;
-    return probe.reason || '未知原因';
+    return probe.reason || t('popup.reasons.unknown', null, 'Unknown reason');
   }
 
   function setToolDetailStatusText(text, tone = 'muted', strong = false) {
@@ -1311,14 +1681,14 @@ document.addEventListener('DOMContentLoaded', function () {
     const frequentOrderBefore = [...frequentOrder];
 
     pinnedIds.delete(id);
-    chrome.storage.local.set({ pinned_bookmarks: Array.from(pinnedIds) }, () => {
+    savePinnedPreferences({ pinned_bookmarks: Array.from(pinnedIds) }, () => {
       if (navigationStack.length <= 1) buildDashboard();
       else refreshView();
-      showToast('已从我的置顶移除', () => {
+      showToast(t('popup.toasts.removedFromPinned', null, 'Removed from Pinned'), () => {
         // undo
         pinnedIds = new Set(orderBefore);
         frequentOrder = frequentOrderBefore;
-        chrome.storage.local.set({
+        savePinnedPreferences({
           pinned_bookmarks: Array.from(pinnedIds),
           frequent_order: frequentOrder
         }, () => {
@@ -1336,13 +1706,16 @@ document.addEventListener('DOMContentLoaded', function () {
         isFolder,
         isFrequent,
         isRecent,
+        targetNodePinKey,
         targetNodeId,
         targetNodeDomain,
         pinnedIds
       })
       : {
         showPin: !isRecent,
-        pinText: pinnedIds.has(targetNodeId || targetNodeDomain) ? '从我的置顶移除' : '添加到我的置顶',
+        pinText: pinnedIds.has(targetNodePinKey || targetNodeId || targetNodeDomain)
+          ? t('popup.contextMenu.removeFromPinned', null, 'Remove from Pinned')
+          : t('popup.contextMenu.addToPinned', null, 'Add to Pinned'),
         showSortName: isFolder && !isRecent,
         showSortTime: isFolder && !isRecent,
         showEdit: (targetNodeId || isFrequent) && !isRecent,
@@ -1384,7 +1757,7 @@ document.addEventListener('DOMContentLoaded', function () {
     if (menuAddToGroup) {
       menuAddToGroup.addEventListener('click', () => {
         // TODO: 接入项目已有的“添加到分组”能力。这里预留调用接口
-        showToast('开发中：支持将其添加到我的分组');
+        showToast(t('popup.toasts.featureInProgress', null, 'In progress: add to group support'));
         contextMenu.style.display = 'none';
       });
     }
@@ -1398,7 +1771,7 @@ document.addEventListener('DOMContentLoaded', function () {
           hiddenRecentUrls.push(activeUrl);
           chrome.storage.local.set({ hidden_recent_urls: hiddenRecentUrls }, () => {
             buildRecents();
-            showToast('已从最近访问列表移除', () => {
+            showToast(t('popup.toasts.removedFromRecent', null, 'Removed from Recent'), () => {
               // 撤销逻辑
               hiddenRecentUrls = hiddenRecentUrls.filter(u => u !== activeUrl);
               chrome.storage.local.set({ hidden_recent_urls: hiddenRecentUrls }, () => {
@@ -1412,21 +1785,21 @@ document.addEventListener('DOMContentLoaded', function () {
     }
 
     menuPin.addEventListener('click', () => {
-      const activeId = targetNodeId || targetNodeDomain;
+      const activeId = targetNodePinKey || targetNodeId || targetNodeDomain;
       if (!activeId) return;
 
       if (pinnedIds.has(activeId)) {
         removeFromPinnedWithUndo(activeId, -1);
       } else {
         if (pinnedIds.size >= 8) {
-          showToast('我的置顶最多只能添加 8 个网站');
+          showToast(t('popup.toasts.maxPinned', null, 'Pinned supports up to 8 sites'));
           return;
         }
         pinnedIds.add(activeId);
-        chrome.storage.local.set({ pinned_bookmarks: Array.from(pinnedIds) }, () => {
+        savePinnedPreferences({ pinned_bookmarks: Array.from(pinnedIds) }, () => {
           if (navigationStack.length <= 1) buildDashboard();
           else refreshView();
-          showToast('已添加到我的置顶');
+          showToast(t('popup.toasts.addedToPinned', null, 'Added to Pinned'));
         });
       }
     });
@@ -1444,7 +1817,9 @@ document.addEventListener('DOMContentLoaded', function () {
         // 书签项：直接编辑书签
         chrome.bookmarks.get(targetNodeId, (nodes) => {
           const node = nodes[0];
-          editModalTitle.textContent = targetNodeIsFolder ? '编辑文件夹' : '编辑书签';
+          editModalTitle.textContent = targetNodeIsFolder
+            ? t('popup.edit.titleFolder', null, 'Edit Folder')
+            : t('popup.edit.titleBookmark', null, 'Edit Bookmark');
           editTitleInput.value = node.title || '';
           if (targetNodeIsFolder) {
             if (editUrlGroup) editUrlGroup.style.display = 'none';
@@ -1458,10 +1833,11 @@ document.addEventListener('DOMContentLoaded', function () {
         });
       } else if (targetNodeDomain) {
         // 历史记录项：编辑自定义显示名称和网址
-        editModalTitle.textContent = '编辑常用访问';
-        editTitleInput.value = frequentCustomTitles[targetNodeDomain] || targetNodeDomain;
+        const frequentKey = targetFrequentKey || targetNodePinKey || targetNodeDomain;
+        editModalTitle.textContent = t('popup.edit.titleFrequent', null, 'Edit Frequent Site');
+        editTitleInput.value = frequentCustomTitles[frequentKey] || frequentCustomTitles[targetNodeDomain] || targetNodeDomain;
         if (editUrlGroup) editUrlGroup.style.display = 'block';
-        editUrlInput.value = frequentCustomUrls[targetNodeDomain] || targetFrequentUrl || '';
+        editUrlInput.value = frequentCustomUrls[frequentKey] || frequentCustomUrls[targetNodeDomain] || targetFrequentUrl || '';
         editModal.style.display = 'flex';
         editTitleInput.focus();
       }
@@ -1470,9 +1846,9 @@ document.addEventListener('DOMContentLoaded', function () {
     menuDelete.addEventListener('click', async () => {
       if (!targetNodeId) return;
       const confirmMessage = targetNodeIsFolder
-        ? '确定删除该文件夹及其所有子项吗？'
-        : '确定删除该书签吗？';
-      if (!(await confirmDangerAction(confirmMessage, { okText: '删除' }))) return;
+        ? t('popup.confirm.deleteFolder', null, 'Delete this folder and all of its children?')
+        : t('popup.confirm.deleteBookmark', null, 'Delete this bookmark?');
+      if (!(await confirmDangerAction(confirmMessage, { okText: t('common.delete', null, 'Delete') }))) return;
       if (targetNodeIsFolder) {
         chrome.bookmarks.removeTree(targetNodeId, refreshView);
       } else {
@@ -1501,10 +1877,21 @@ document.addEventListener('DOMContentLoaded', function () {
         });
       } else if (targetNodeDomain) {
         // 历史记录项：保存自定义标题和 URL
-        frequentCustomTitles[targetNodeDomain] = title;
+        const frequentKey = targetFrequentKey || targetNodePinKey || targetNodeDomain;
+        frequentCustomTitles[frequentKey] = title;
+        if (frequentKey !== targetNodeDomain) {
+          delete frequentCustomTitles[targetNodeDomain];
+        }
         const customUrl = editUrlInput.value.trim();
-        if (customUrl) frequentCustomUrls[targetNodeDomain] = customUrl;
-        chrome.storage.local.set({
+        if (customUrl) {
+          frequentCustomUrls[frequentKey] = customUrl;
+        } else {
+          delete frequentCustomUrls[frequentKey];
+        }
+        if (frequentKey !== targetNodeDomain) {
+          delete frequentCustomUrls[targetNodeDomain];
+        }
+        saveCustomPreferences({
           frequent_custom_titles: frequentCustomTitles,
           frequent_custom_urls: frequentCustomUrls
         }, () => {
@@ -1572,7 +1959,7 @@ document.addEventListener('DOMContentLoaded', function () {
     toolsDetailView.style.display = 'none';
     toolsMenuView.style.display = 'block';
 
-    toolsTitle.textContent = '书签工具箱';
+    toolsTitle.textContent = t('popup.tools.toolboxTitle', null, 'Bookmark Toolbox');
     toolsBackBtn.style.visibility = 'hidden';
     toolsResultList.innerHTML = '';
   }
@@ -1583,13 +1970,13 @@ document.addEventListener('DOMContentLoaded', function () {
     // 0. 导入书签
     if (btnImportBookmarksNew) {
       btnImportBookmarksNew.addEventListener('click', () => {
-        openToolView('导入书签');
+        openToolView(t('popup.tools.importTitle', null, 'Import Bookmarks'));
         toolDetailStatus.style.display = 'flex';
-        setToolDetailStatusText('状态：等待选择文件');
+        setToolDetailStatusText(t('popup.tools.importWaiting', null, 'Status: waiting for file selection'));
 
-        toolDetailMainAction.innerHTML = `<button id="btnSelectImportFile" class="tool-btn tool-btn-primary">选择文件</button>`;
+        toolDetailMainAction.innerHTML = `<button id="btnSelectImportFile" class="tool-btn tool-btn-primary">${escapeHtml(t('popup.tools.importSelectFile', null, 'Select File'))}</button>`;
         toolDetailWarning.style.display = 'block';
-        toolDetailWarning.innerHTML = '⚠️ 导入会在“其他书签”下创建新文件夹并写入内容。支持标准 HTML 书签文件（Netscape 格式），导入后可手动整理。';
+        toolDetailWarning.innerHTML = t('popup.tools.importWarning', null, '⚠️ Import creates a new folder under Other Bookmarks and writes imported entries there. Standard HTML bookmark files (Netscape format) are supported.');
 
         document.getElementById('btnSelectImportFile').addEventListener('click', () => {
           importFileInput.click();
@@ -1600,19 +1987,19 @@ document.addEventListener('DOMContentLoaded', function () {
     // 0.1 导出书签
     if (btnExportBookmarksNew) {
       btnExportBookmarksNew.addEventListener('click', () => {
-        openToolView('导出书签');
+        openToolView(t('popup.tools.exportTitle', null, 'Export Bookmarks'));
         toolDetailStatus.style.display = 'flex';
-        setToolDetailStatusText('状态：准备导出');
+        setToolDetailStatusText(t('popup.tools.exportReady', null, 'Status: ready to export'));
 
-        toolDetailMainAction.innerHTML = `<button id="btnExecuteExport" class="tool-btn tool-btn-primary">立即导出</button>`;
+        toolDetailMainAction.innerHTML = `<button id="btnExecuteExport" class="tool-btn tool-btn-primary">${escapeHtml(t('popup.tools.exportNow', null, 'Export Now'))}</button>`;
         toolDetailWarning.style.display = 'block';
-        toolDetailWarning.innerHTML = '💡 提示：导出书签将把当前所有书签及目录结构备份为一个标准 HTML 文件，可用于在其他浏览器中恢复。';
+        toolDetailWarning.innerHTML = t('popup.tools.exportWarning', null, '💡 Export backs up your full bookmark tree as a standard HTML file that can be restored in another browser.');
 
         document.getElementById('btnExecuteExport').addEventListener('click', (e) => {
           e.target.className = 'tool-btn tool-btn-primary';
           e.target.disabled = true;
-          e.target.textContent = '处理中...';
-          setToolDetailStatusText('状态：正在生成...');
+          e.target.textContent = t('popup.tools.statusRunning', null, 'Working...');
+          setToolDetailStatusText(t('popup.tools.exportGenerating', null, 'Status: generating export...'));
           handleExportBookmarks(e.target);
         });
       });
@@ -1621,22 +2008,22 @@ document.addEventListener('DOMContentLoaded', function () {
     // 1. 扫描重复书签
     if (btnFindDuplicates) {
       btnFindDuplicates.addEventListener('click', () => {
-        openToolView('扫描重复');
+        openToolView(t('popup.tools.duplicatesTitle', null, 'Find Duplicates'));
         toolDetailStatus.style.display = 'flex';
-        setToolDetailStatusText('状态：尚未扫描');
+        setToolDetailStatusText(t('popup.tools.duplicatesIdle', null, 'Status: not scanned yet'));
 
-        toolDetailMainAction.innerHTML = `<button id="btnStartFindDuplicates" class="tool-btn tool-btn-primary">开始扫描</button>`;
+        toolDetailMainAction.innerHTML = `<button id="btnStartFindDuplicates" class="tool-btn tool-btn-primary">${escapeHtml(t('popup.tools.duplicatesStart', null, 'Start Scan'))}</button>`;
         toolDetailWarning.style.display = 'block';
-        toolDetailWarning.innerHTML = '💡 提示：基于完全相同的 URL 来判断重复。批量清理重复项后将不可撤销退回，请谨慎操作。';
+        toolDetailWarning.innerHTML = t('popup.tools.duplicatesWarning', null, '💡 Duplicates are detected by exact URL match. Bulk cleanup cannot be undone.');
 
         document.getElementById('btnStartFindDuplicates').addEventListener('click', (e) => {
           const btn = e.target;
           btn.className = 'tool-btn tool-btn-primary';
           btn.disabled = true;
-          btn.textContent = '处理中...';
+          btn.textContent = t('popup.tools.statusRunning', null, 'Working...');
           toolDetailStatus.style.display = 'flex';
-          setToolDetailStatusText('运行中：正在扫描整个书签库...');
-          setToolsResultMessage('处理中...');
+          setToolDetailStatusText(t('popup.tools.duplicatesScanning', null, 'Running: scanning the full bookmark library...'));
+          setToolsResultMessage(t('popup.tools.statusRunning', null, 'Working...'));
 
           getBookmarkTreeCached((tree) => {
             const urlMap = new Map();
@@ -1660,17 +2047,17 @@ document.addEventListener('DOMContentLoaded', function () {
             });
 
             if (duplicateGroups.length === 0) {
-              setToolDetailStatusText('扫描完成：未发现任何重复的书签。', 'success');
-              setToolsResultMessage('🎉 您的书签库非常整洁！');
-              document.getElementById('statusDuplicates').textContent = '上次扫描：0 项重复';
+              setToolDetailStatusText(t('popup.tools.duplicatesNone', null, 'Scan complete: no duplicate bookmarks found.'), 'success');
+              setToolsResultMessage(t('popup.tools.cleanLibrary', null, '🎉 Your bookmark library is very clean!'));
+              document.getElementById('statusDuplicates').textContent = t('popup.tools.duplicatesLastStatusZero', null, 'Last scan: 0 duplicates');
               btn.disabled = false;
-              btn.textContent = '重新扫描';
+              btn.textContent = t('popup.tools.duplicatesRescan', null, 'Scan Again');
               btn.className = 'tool-btn tool-btn-secondary';
               return;
             }
 
-            setToolDetailStatusText(`扫描完成：共发现 ${duplicateGroups.length} 组重复链接。`, 'warning', true);
-            document.getElementById('statusDuplicates').textContent = `上次扫描：${duplicateGroups.length} 组重复`;
+            setToolDetailStatusText(t('popup.tools.duplicatesDone', { count: duplicateGroups.length }, `Scan complete: ${duplicateGroups.length} duplicate URL groups found.`), 'warning', true);
+            document.getElementById('statusDuplicates').textContent = t('popup.tools.duplicatesLastStatus', { count: duplicateGroups.length }, `Last scan: ${duplicateGroups.length} duplicate groups`);
 
             let html = '';
             duplicateGroups.forEach(group => {
@@ -1680,27 +2067,30 @@ document.addEventListener('DOMContentLoaded', function () {
                 const shouldCheck = nIdx > 0;
                 html += `<div class="tool-check-item">
                                         <input type="checkbox" class="duplicate-checkbox" data-id="${node.id}" ${shouldCheck ? 'checked' : ''}>
-                                        <span class="tool-check-label" title="${escapeHtml(node.title)}">${escapeHtml(node.title || '无标题')}</span>
+                                        <span class="tool-check-label" title="${escapeHtml(node.title)}">${escapeHtml(node.title || t('common.untitled', null, 'Untitled'))}</span>
                                        </div>`;
               });
               html += `</div>`;
             });
 
             toolDetailFooter.style.display = 'flex';
-            toolDetailFooter.innerHTML = `<button id="btnCleanDuplicates" class="tool-btn tool-btn-danger">清理选中项</button>`;
+            toolDetailFooter.innerHTML = `<button id="btnCleanDuplicates" class="tool-btn tool-btn-danger">${escapeHtml(t('popup.tools.duplicatesClean', null, 'Delete Selected'))}</button>`;
             toolsResultList.innerHTML = html;
             btn.disabled = false;
-            btn.textContent = '重新扫描';
+            btn.textContent = t('popup.tools.duplicatesRescan', null, 'Scan Again');
             btn.className = 'tool-btn tool-btn-secondary';
 
             document.getElementById('btnCleanDuplicates').addEventListener('click', async (eClean) => {
               const checkboxes = toolsResultList.querySelectorAll('.duplicate-checkbox:checked');
               if (checkboxes.length === 0) return;
-              if (!(await confirmDangerAction(`确定删除选中的 ${checkboxes.length} 个重复书签吗？`, { okText: '删除' }))) return;
+              if (!(await confirmDangerAction(
+                t('popup.tools.duplicatesConfirm', { count: checkboxes.length }, `Delete the selected ${checkboxes.length} duplicate bookmarks?`),
+                { okText: t('common.delete', null, 'Delete') }
+              ))) return;
               eClean.target.className = 'tool-btn tool-btn-danger';
               eClean.target.disabled = true;
-              eClean.target.textContent = '清理中...';
-              setToolDetailStatusText('处理中：正在移除选中项...');
+              eClean.target.textContent = t('popup.tools.cleanRunning', null, 'Deleting...');
+              setToolDetailStatusText(t('popup.tools.scanCleanWorking', null, 'Working: removing selected items...'));
               let promises = Array.from(checkboxes).map(cb => {
                 return new Promise(res => chrome.bookmarks.remove(cb.getAttribute('data-id'), res));
               });
@@ -1717,20 +2107,20 @@ document.addEventListener('DOMContentLoaded', function () {
     // 2. 统计报告
     if (btnBookmarkStats) {
       btnBookmarkStats.addEventListener('click', () => {
-        openToolView('书签统计');
+        openToolView(t('popup.tools.statsTitle', null, 'Bookmark Stats'));
         toolDetailStatus.style.display = 'flex';
-        setToolDetailStatusText('状态：尚未分析');
+        setToolDetailStatusText(t('popup.tools.statsIdle', null, 'Status: not analyzed yet'));
 
-        toolDetailMainAction.innerHTML = `<button id="btnStartStats" class="tool-btn tool-btn-primary">开始分析</button>`;
+        toolDetailMainAction.innerHTML = `<button id="btnStartStats" class="tool-btn tool-btn-primary">${escapeHtml(t('popup.tools.statsStart', null, 'Analyze'))}</button>`;
         toolDetailWarning.style.display = 'block';
-        toolDetailWarning.innerHTML = '💡 提示：全面统计书签库的层级结构与健康度，并生成域名的分布榜单，分析过程完全在本地进行。';
+        toolDetailWarning.innerHTML = t('popup.tools.statsWarning', null, '💡 Generates a local structural and health report for your bookmark library, including top domains.');
 
         document.getElementById('btnStartStats').addEventListener('click', (e) => {
           const btn = e.target;
           btn.className = 'tool-btn tool-btn-primary';
           btn.disabled = true;
-          btn.textContent = '处理中...';
-          setToolDetailStatusText('运行中：正在收集数据...');
+          btn.textContent = t('popup.tools.statusRunning', null, 'Working...');
+          setToolDetailStatusText(t('popup.tools.statsCollecting', null, 'Running: collecting data...'));
 
           getBookmarkTreeCached((tree) => {
             let totalBookmarks = 0;
@@ -1764,7 +2154,7 @@ document.addEventListener('DOMContentLoaded', function () {
                   // 最大文件夹
                   const directChildren = node.children.length;
                   if (directChildren > largestFolder.count && node.id !== '0') {
-                    largestFolder = { title: node.title || '未命名', count: directChildren };
+                    largestFolder = { title: node.title || t('common.untitled', null, 'Untitled'), count: directChildren };
                   }
                   traverse(node.children, depth + 1);
                 }
@@ -1798,48 +2188,48 @@ document.addEventListener('DOMContentLoaded', function () {
                 </div>`;
             });
 
-            setToolDetailStatusText('分析完成', 'success');
+            setToolDetailStatusText(t('popup.tools.statsDone', null, 'Analysis complete'), 'success');
             toolsResultList.innerHTML = `
               <div class="stats-card-grid stats-card-grid-tight">
                 <div class="stat-card stat-card-compact">
                   <div class="stat-value stat-value-medium">${totalBookmarks}</div>
-                  <div class="stat-label">书签总数</div>
+                  <div class="stat-label">${escapeHtml(t('popup.tools.statsTotalBookmarks', null, 'Bookmarks'))}</div>
                 </div>
                 <div class="stat-card stat-card-compact">
                   <div class="stat-value stat-value-medium">${totalFolders}</div>
-                  <div class="stat-label">文件夹总数</div>
+                  <div class="stat-label">${escapeHtml(t('popup.tools.statsTotalFolders', null, 'Folders'))}</div>
                 </div>
                 <div class="stat-card stat-card-compact">
                   <div class="stat-value stat-value-medium">${maxDepth}</div>
-                  <div class="stat-label">最深层级</div>
+                  <div class="stat-label">${escapeHtml(t('popup.tools.statsMaxDepth', null, 'Max Depth'))}</div>
                 </div>
                 <div class="stat-card stat-card-compact">
                   <div class="stat-value stat-value-medium ${emptyFolders > 0 ? 'stat-value-warning' : ''}">${emptyFolders}</div>
-                  <div class="stat-label">空文件夹</div>
+                  <div class="stat-label">${escapeHtml(t('popup.tools.statsEmptyFolders', null, 'Empty Folders'))}</div>
                 </div>
               </div>
 
               <div class="stats-section">
-                <div class="stats-section-title">域名分布 Top 10</div>
+                <div class="stats-section-title">${escapeHtml(t('popup.tools.statsTopDomains', null, 'Top 10 Domains'))}</div>
                 <div class="stats-section-panel stats-domain-list">
-                  ${domainHtml || '<div class="stats-empty">暂无数据</div>'}
+                  ${domainHtml || `<div class="stats-empty">${escapeHtml(t('common.noData', null, 'No data'))}</div>`}
                 </div>
               </div>
 
               <div class="stats-section">
-                <div class="stats-section-title">结构健康度</div>
+                <div class="stats-section-title">${escapeHtml(t('popup.tools.statsStructureHealth', null, 'Structure Health'))}</div>
                 <div class="stats-section-panel stats-health-list">
                   <div class="stats-health-row">
-                    <span class="stats-health-label">重复链接</span>
-                    <span class="stats-health-value ${duplicateCount > 0 ? 'stats-health-warning' : 'stats-health-good'}">${duplicateCount > 0 ? `${duplicateCount} 组` : '无'}</span>
+                    <span class="stats-health-label">${escapeHtml(t('popup.tools.statsDuplicateLinks', null, 'Duplicate Links'))}</span>
+                    <span class="stats-health-value ${duplicateCount > 0 ? 'stats-health-warning' : 'stats-health-good'}">${duplicateCount > 0 ? escapeHtml(t('popup.tools.statsGroups', { count: duplicateCount }, `${duplicateCount} groups`)) : escapeHtml(t('popup.tools.statsNone', null, 'None'))}</span>
                   </div>
                   <div class="stats-health-row">
-                    <span class="stats-health-label">空文件夹</span>
-                    <span class="stats-health-value ${emptyFolders > 0 ? 'stats-health-warning' : 'stats-health-good'}">${emptyFolders > 0 ? `${emptyFolders} 个` : '无'}</span>
+                    <span class="stats-health-label">${escapeHtml(t('popup.tools.statsEmptyFolders', null, 'Empty Folders'))}</span>
+                    <span class="stats-health-value ${emptyFolders > 0 ? 'stats-health-warning' : 'stats-health-good'}">${emptyFolders > 0 ? escapeHtml(t('popup.tools.statsItems', { count: emptyFolders }, `${emptyFolders} items`)) : escapeHtml(t('popup.tools.statsNone', null, 'None'))}</span>
                   </div>
                   <div class="stats-health-row">
-                    <span class="stats-health-label">最大文件夹</span>
-                    <span class="stats-health-value stats-health-primary">${escapeHtml(largestFolder.title)}（${largestFolder.count} 项）</span>
+                    <span class="stats-health-label">${escapeHtml(t('popup.tools.statsLargestFolder', null, 'Largest Folder'))}</span>
+                    <span class="stats-health-value stats-health-primary">${escapeHtml(largestFolder.title)} (${escapeHtml(t('popup.tools.statsItems', { count: largestFolder.count }, `${largestFolder.count} items`))})</span>
                   </div>
                 </div>
               </div>
@@ -1848,9 +2238,9 @@ document.addEventListener('DOMContentLoaded', function () {
               const pct = Math.max(0, Math.min(100, Number(el.dataset.fill || 0)));
               el.style.width = `${pct}%`;
             });
-            document.getElementById('statusStats').textContent = `共 ${totalBookmarks} 个书签`;
+            document.getElementById('statusStats').textContent = t('popup.tools.statsCountLabel', { count: totalBookmarks }, `${totalBookmarks} bookmarks total`);
             btn.disabled = false;
-            btn.textContent = '重新分析';
+            btn.textContent = t('popup.tools.statsReanalyze', null, 'Analyze Again');
           });
         });
       });
@@ -1858,27 +2248,27 @@ document.addEventListener('DOMContentLoaded', function () {
 
     if (btnFindBrokenLinks) {
       btnFindBrokenLinks.addEventListener('click', () => {
-        openToolView('检查失效链接');
+        openToolView(t('popup.tools.brokenTitle', null, 'Check Broken Links'));
         toolDetailStatus.style.display = 'flex';
-        setToolDetailStatusText('状态：尚未扫描');
-        toolDetailMainAction.innerHTML = `<button id="btnStartCheckBroken" class="tool-btn tool-btn-primary">开始检测</button>`;
+        setToolDetailStatusText(t('popup.tools.brokenIdle', null, 'Status: not scanned yet'));
+        toolDetailMainAction.innerHTML = `<button id="btnStartCheckBroken" class="tool-btn tool-btn-primary">${escapeHtml(t('popup.tools.brokenStart', null, 'Start Check'))}</button>`;
         toolDetailWarning.style.display = 'block';
-        toolDetailWarning.innerHTML = '⚠️ 新策略：优先用 HEAD 探测并分级重试；无法高置信判定的条目会标记为“待复核”，避免误删。';
+        toolDetailWarning.innerHTML = t('popup.tools.brokenWarning', null, '⚠️ Strategy: probe with HEAD first, retry by confidence level, and mark uncertain links for manual review to avoid false deletes.');
 
         document.getElementById('btnStartCheckBroken').addEventListener('click', async (e) => {
           const btn = e.target;
           btn.className = 'tool-btn tool-btn-primary';
           btn.disabled = true;
-          btn.textContent = '处理中...';
+          btn.textContent = t('popup.tools.statusRunning', null, 'Working...');
           toolDetailStatus.style.display = 'flex';
-          setToolDetailStatusText('运行中：正在收集所有链接...');
-          setToolsResultMessage('处理中...');
+          setToolDetailStatusText(t('popup.tools.brokenCollecting', null, 'Running: collecting all links...'));
+          setToolsResultMessage(t('popup.tools.statusRunning', null, 'Working...'));
 
           if (!toolsModule || !toolsModule.runBrokenLinkScan || !toolsModule.collectHttpLinks) {
-            setToolDetailStatusText('状态：工具模块未加载，无法执行检测', 'error');
-            setToolsResultMessage('请刷新扩展后重试', 'error');
+            setToolDetailStatusText(t('popup.tools.brokenModuleMissing', null, 'Status: tools module is unavailable, cannot run detection'), 'error');
+            setToolsResultMessage(t('popup.tools.brokenModuleMissingResult', null, 'Reload the extension and try again'), 'error');
             btn.disabled = false;
-            btn.textContent = '重新检测';
+            btn.textContent = t('popup.tools.brokenRetry', null, 'Check Again');
             btn.className = 'tool-btn tool-btn-secondary';
             return;
           }
@@ -1899,7 +2289,7 @@ document.addEventListener('DOMContentLoaded', function () {
 
           const setScanIdle = () => {
             btn.disabled = false;
-            btn.textContent = '重新检测';
+            btn.textContent = t('popup.tools.brokenRetry', null, 'Check Again');
             btn.className = 'tool-btn tool-btn-secondary';
           };
 
@@ -1909,7 +2299,7 @@ document.addEventListener('DOMContentLoaded', function () {
             const totalCount = links.length;
 
             if (totalCount === 0) {
-              setToolDetailStatusText('扫描完成：未发现有效 HTTP(S) 链接需要检测。', 'success');
+              setToolDetailStatusText(t('popup.tools.brokenNoHttp', null, 'Scan complete: no valid HTTP(S) links found to inspect.'), 'success');
               toolsResultList.innerHTML = '';
               toolDetailFooter.style.display = 'none';
               setScanIdle();
@@ -1917,11 +2307,11 @@ document.addEventListener('DOMContentLoaded', function () {
               return;
             }
 
-            setToolDetailStatusText(`运行中：已找到 ${totalCount} 个链接，准备探测。这可能需要一分钟。`);
+            setToolDetailStatusText(t('popup.tools.brokenPreparing', { count: totalCount }, `Running: found ${totalCount} links, preparing probes. This may take about a minute.`));
             toolsResultList.innerHTML = '';
             toolDetailFooter.style.display = 'flex';
             toolDetailFooter.style.justifyContent = 'center';
-            toolDetailFooter.innerHTML = `<button id="btnCancelBrokenScan" class="tool-btn tool-btn-secondary">取消检测</button>`;
+            toolDetailFooter.innerHTML = `<button id="btnCancelBrokenScan" class="tool-btn tool-btn-secondary">${escapeHtml(t('popup.tools.brokenCancel', null, 'Cancel Check'))}</button>`;
             const cancelBtn = document.getElementById('btnCancelBrokenScan');
             if (cancelBtn) {
               cancelBtn.addEventListener('click', () => {
@@ -1932,8 +2322,8 @@ document.addEventListener('DOMContentLoaded', function () {
                   scanSession.controllers.forEach(controller => controller.abort());
                   scanSession.controllers.clear();
                 }
-                setToolDetailStatusText(`检测已取消（${completedCount}/${totalCount}）`, 'warning');
-                setToolsResultMessage('已取消本次检测');
+                setToolDetailStatusText(t('popup.tools.brokenCancelled', { completed: completedCount, total: totalCount }, `Check cancelled (${completedCount}/${totalCount})`), 'warning');
+                setToolsResultMessage(t('popup.tools.brokenCancelledResult', null, 'This check was cancelled'));
                 toolDetailFooter.style.display = 'none';
                 setScanIdle();
                 if (brokenLinkScanSession === scanSession) brokenLinkScanSession = null;
@@ -1947,7 +2337,7 @@ document.addEventListener('DOMContentLoaded', function () {
               onProgress: (completed, total) => {
                 completedCount = completed;
                 if (completed % 10 === 0 || completed === total) {
-                  setToolDetailStatusText(`运行中：正在探测 ${completed}/${total}...`);
+                  setToolDetailStatusText(t('popup.tools.brokenProgress', { completed, total }, `Running: probing ${completed}/${total}...`));
                 }
               }
             });
@@ -1963,10 +2353,12 @@ document.addEventListener('DOMContentLoaded', function () {
             const cacheHits = scanResult.cacheHits || 0;
 
             if (brokenLinks.length === 0 && uncertainLinks.length === 0) {
-              const suffix = cacheHits > 0 ? `（缓存复用 ${cacheHits} 条）` : '';
-              setToolDetailStatusText(`扫描完成：${totalCount} 个链接均可访问。${suffix}`, 'success');
-              setToolsResultMessage('🎉 全部链接均正常！');
-              document.getElementById('statusBrokenLinks').textContent = '上次扫描：未发现死链';
+              const suffix = cacheHits > 0
+                ? t('popup.tools.brokenCacheSuffix', { count: cacheHits }, `(reused ${cacheHits} cached results)`)
+                : '';
+              setToolDetailStatusText(t('popup.tools.brokenAllGood', { count: totalCount, suffix }, `Scan complete: all ${totalCount} links are reachable. ${suffix}`), 'success');
+              setToolsResultMessage(t('popup.tools.brokenAllGoodResult', null, '🎉 All links look good!'));
+              document.getElementById('statusBrokenLinks').textContent = t('popup.tools.brokenLastStatusClean', null, 'Last scan: no broken links found');
               toolDetailFooter.style.display = 'none';
               setScanIdle();
               if (brokenLinkScanSession === scanSession) brokenLinkScanSession = null;
@@ -1974,36 +2366,40 @@ document.addEventListener('DOMContentLoaded', function () {
             }
 
             if (brokenLinks.length > 0) {
-              const suffix = cacheHits > 0 ? `（缓存复用 ${cacheHits} 条）` : '';
-              setToolDetailStatusText(`扫描完成：确认失效 ${brokenLinks.length} 条，待复核 ${uncertainLinks.length} 条。${suffix}`, 'warning', true);
+              const suffix = cacheHits > 0
+                ? t('popup.tools.brokenCacheSuffix', { count: cacheHits }, `(reused ${cacheHits} cached results)`)
+                : '';
+              setToolDetailStatusText(t('popup.tools.brokenDoneMixed', { broken: brokenLinks.length, uncertain: uncertainLinks.length, suffix }, `Scan complete: ${brokenLinks.length} confirmed broken, ${uncertainLinks.length} need review. ${suffix}`), 'warning', true);
             } else {
-              const suffix = cacheHits > 0 ? `（缓存复用 ${cacheHits} 条）` : '';
-              setToolDetailStatusText(`扫描完成：未发现高置信失效链接，待复核 ${uncertainLinks.length} 条。${suffix}`, 'warning', true);
+              const suffix = cacheHits > 0
+                ? t('popup.tools.brokenCacheSuffix', { count: cacheHits }, `(reused ${cacheHits} cached results)`)
+                : '';
+              setToolDetailStatusText(t('popup.tools.brokenDoneReviewOnly', { uncertain: uncertainLinks.length, suffix }, `Scan complete: no high-confidence broken links found, ${uncertainLinks.length} need review. ${suffix}`), 'warning', true);
             }
-            document.getElementById('statusBrokenLinks').textContent = `上次扫描：${brokenLinks.length} 确认失效 / ${uncertainLinks.length} 待复核`;
+            document.getElementById('statusBrokenLinks').textContent = t('popup.tools.brokenLastStatus', { broken: brokenLinks.length, uncertain: uncertainLinks.length }, `Last scan: ${brokenLinks.length} confirmed broken / ${uncertainLinks.length} review needed`);
 
             let html = '';
             if (brokenLinks.length > 0) {
-              html += `<div class="tool-check-group-title">确认失效（高置信）</div>`;
+              html += `<div class="tool-check-group-title">${escapeHtml(t('popup.tools.brokenConfirmedGroup', null, 'Confirmed Broken'))}</div>`;
               html += `<div class="tool-check-group">`;
               brokenLinks.forEach((b) => {
                 const reason = getBrokenProbeReasonLabel(b.probe);
                 html += `<div class="tool-check-item">
                           <input type="checkbox" class="broken-checkbox" data-id="${b.node.id}" checked>
-                          <span class="tool-check-label" title="${escapeHtml(b.node.url)}">❌ ${escapeHtml(b.node.title || '无标题')}</span>
+                          <span class="tool-check-label" title="${escapeHtml(b.node.url)}">❌ ${escapeHtml(b.node.title || t('common.untitled', null, 'Untitled'))}</span>
                          </div>
                          <div class="tool-check-url tool-check-url-error">${escapeHtml(b.node.url)}<br>[${escapeHtml(reason)}]</div>`;
               });
               html += `</div>`;
             }
             if (uncertainLinks.length > 0) {
-              html += `<div class="tool-check-group-title">待复核（可能受跨域、防爬、网络波动影响）</div>`;
+              html += `<div class="tool-check-group-title">${escapeHtml(t('popup.tools.brokenReviewGroup', null, 'Needs Review (cross-origin, anti-bot, or network issues possible)'))}</div>`;
               html += `<div class="tool-check-group tool-check-group-dashed">`;
               uncertainLinks.forEach((u) => {
                 const reason = getBrokenProbeReasonLabel(u.probe);
                 html += `<div class="tool-check-item">
                           <input type="checkbox" class="broken-checkbox" data-id="${u.node.id}">
-                          <span class="tool-check-label" title="${escapeHtml(u.node.url)}">⚠️ ${escapeHtml(u.node.title || '无标题')}</span>
+                          <span class="tool-check-label" title="${escapeHtml(u.node.url)}">⚠️ ${escapeHtml(u.node.title || t('common.untitled', null, 'Untitled'))}</span>
                          </div>
                          <div class="tool-check-url tool-check-url-warn">${escapeHtml(u.node.url)}<br>[${escapeHtml(reason)}]</div>`;
               });
@@ -2012,7 +2408,7 @@ document.addEventListener('DOMContentLoaded', function () {
 
             toolDetailFooter.style.display = 'flex';
             toolDetailFooter.style.justifyContent = 'center';
-            toolDetailFooter.innerHTML = `<button id="btnCleanBrokenLinks" class="tool-btn tool-btn-danger">清理选中项</button>`;
+            toolDetailFooter.innerHTML = `<button id="btnCleanBrokenLinks" class="tool-btn tool-btn-danger">${escapeHtml(t('popup.tools.brokenClean', null, 'Delete Selected'))}</button>`;
             toolsResultList.innerHTML = html;
             setScanIdle();
             if (brokenLinkScanSession === scanSession) brokenLinkScanSession = null;
@@ -2021,17 +2417,18 @@ document.addEventListener('DOMContentLoaded', function () {
               const checkboxes = toolsResultList.querySelectorAll('.broken-checkbox:checked');
               if (checkboxes.length === 0) return;
               if (!(await confirmDangerAction(
-                `确定删除选中的 ${checkboxes.length} 条链接吗？`,
+                t('popup.tools.brokenConfirmDelete', { count: checkboxes.length }, `Delete the selected ${checkboxes.length} links?`),
                 {
-                  okText: '删除',
-                  hint: brokenLinks.length === 0 ? '当前均为待复核条目，建议先手动确认后再删除。'
-                    : '已包含高置信失效条目，仍建议在删除前快速复核。'
+                  okText: t('common.delete', null, 'Delete'),
+                  hint: brokenLinks.length === 0
+                    ? t('popup.tools.brokenReviewHint', null, 'All selected items still need review. Confirm manually before deleting.')
+                    : t('popup.tools.brokenDangerHint', null, 'High-confidence broken links are included, but a quick manual review is still recommended.')
                 }
               ))) return;
               eClean.target.className = 'tool-btn tool-btn-danger';
               eClean.target.disabled = true;
-              eClean.target.textContent = '清理中...';
-              setToolDetailStatusText('处理中：正在移除选中项...');
+              eClean.target.textContent = t('popup.tools.cleanRunning', null, 'Deleting...');
+              setToolDetailStatusText(t('popup.tools.scanCleanWorking', null, 'Working: removing selected items...'));
               let promises = Array.from(checkboxes).map(cb => {
                 return new Promise(res => chrome.bookmarks.remove(cb.getAttribute('data-id'), res));
               });
@@ -2047,21 +2444,21 @@ document.addEventListener('DOMContentLoaded', function () {
 
     if (btnCleanEmptyFolders) {
       btnCleanEmptyFolders.addEventListener('click', () => {
-        openToolView('清理空文件夹');
+        openToolView(t('popup.tools.emptyFoldersTitle', null, 'Clean Empty Folders'));
         toolDetailStatus.style.display = 'flex';
-        setToolDetailStatusText('状态：尚未分析');
-        toolDetailMainAction.innerHTML = `<button id="btnStartCleanEmpty" class="tool-btn tool-btn-primary">开始扫描</button>`;
+        setToolDetailStatusText(t('popup.tools.emptyFoldersIdle', null, 'Status: not analyzed yet'));
+        toolDetailMainAction.innerHTML = `<button id="btnStartCleanEmpty" class="tool-btn tool-btn-primary">${escapeHtml(t('popup.tools.emptyFoldersStart', null, 'Start Scan'))}</button>`;
         toolDetailWarning.style.display = 'block';
-        toolDetailWarning.innerHTML = '💡 提示：扫描并永久清理内部不含有任何书签、也没有有效子文件夹的空壳结构。';
+        toolDetailWarning.innerHTML = t('popup.tools.emptyFoldersWarning', null, '💡 Finds and permanently removes folders that contain neither bookmarks nor any valid child folders.');
 
         document.getElementById('btnStartCleanEmpty').addEventListener('click', (e) => {
           const btn = e.target;
           btn.className = 'tool-btn tool-btn-primary';
           btn.disabled = true;
-          btn.textContent = '处理中...';
+          btn.textContent = t('popup.tools.statusRunning', null, 'Working...');
           toolDetailStatus.style.display = 'flex';
-          setToolDetailStatusText('运行中：正在扫描结构...');
-          setToolsResultMessage('处理中...');
+          setToolDetailStatusText(t('popup.tools.emptyFoldersScanning', null, 'Running: scanning structure...'));
+          setToolsResultMessage(t('popup.tools.statusRunning', null, 'Working...'));
 
           getBookmarkTreeCached((tree) => {
             let emptyFolders = [];
@@ -2083,43 +2480,46 @@ document.addEventListener('DOMContentLoaded', function () {
             traverse(tree);
 
             if (emptyFolders.length === 0) {
-              setToolDetailStatusText('扫描完成：未发现任何空文件夹。', 'success');
-              setToolsResultMessage('🎉 您的书签库非常整洁！');
-              document.getElementById('statusEmptyFolders').textContent = '上次扫描：0 个空壳';
+              setToolDetailStatusText(t('popup.tools.emptyFoldersNone', null, 'Scan complete: no empty folders found.'), 'success');
+              setToolsResultMessage(t('popup.tools.cleanLibrary', null, '🎉 Your bookmark library is very clean!'));
+              document.getElementById('statusEmptyFolders').textContent = t('popup.tools.emptyFoldersLastStatusZero', null, 'Last scan: 0 empty folders');
               btn.disabled = false;
-              btn.textContent = '重新扫描';
+              btn.textContent = t('popup.tools.duplicatesRescan', null, 'Scan Again');
               btn.className = 'tool-btn tool-btn-secondary';
               return;
             }
 
-            setToolDetailStatusText(`扫描完成：发现 ${emptyFolders.length} 个空壳文件夹。`, 'warning', true);
-            document.getElementById('statusEmptyFolders').textContent = `上次扫描：${emptyFolders.length} 个空壳`;
+            setToolDetailStatusText(t('popup.tools.emptyFoldersDone', { count: emptyFolders.length }, `Scan complete: found ${emptyFolders.length} empty folders.`), 'warning', true);
+            document.getElementById('statusEmptyFolders').textContent = t('popup.tools.emptyFoldersLastStatus', { count: emptyFolders.length }, `Last scan: ${emptyFolders.length} empty folders`);
 
             let html = `<div class="tool-check-group">`;
             emptyFolders.forEach((node) => {
               html += `<div class="tool-check-item">
                         <input type="checkbox" class="empty-folder-checkbox" data-id="${node.id}" checked>
-                        <span class="tool-check-label" title="${escapeHtml(node.title)}">📁 ${escapeHtml(node.title || '未命名')}</span>
+                        <span class="tool-check-label" title="${escapeHtml(node.title)}">📁 ${escapeHtml(node.title || t('common.untitled', null, 'Untitled'))}</span>
                        </div>`;
             });
             html += `</div>`;
 
             toolDetailFooter.style.display = 'flex';
             toolDetailFooter.style.justifyContent = 'center';
-            toolDetailFooter.innerHTML = `<button id="btnCleanFolders" class="tool-btn tool-btn-danger">清理选中项</button>`;
+            toolDetailFooter.innerHTML = `<button id="btnCleanFolders" class="tool-btn tool-btn-danger">${escapeHtml(t('popup.tools.emptyFoldersClean', null, 'Delete Selected'))}</button>`;
             toolsResultList.innerHTML = html;
             btn.disabled = false;
-            btn.textContent = '重新扫描';
+            btn.textContent = t('popup.tools.duplicatesRescan', null, 'Scan Again');
             btn.className = 'tool-btn tool-btn-secondary';
 
             document.getElementById('btnCleanFolders').addEventListener('click', async (eClean) => {
               const checkboxes = toolsResultList.querySelectorAll('.empty-folder-checkbox:checked');
               if (checkboxes.length === 0) return;
-              if (!(await confirmDangerAction(`确定删除选中的 ${checkboxes.length} 个空文件夹吗？`, { okText: '删除' }))) return;
+              if (!(await confirmDangerAction(
+                t('popup.tools.emptyFoldersConfirm', { count: checkboxes.length }, `Delete the selected ${checkboxes.length} empty folders?`),
+                { okText: t('common.delete', null, 'Delete') }
+              ))) return;
               eClean.target.className = 'tool-btn tool-btn-danger';
               eClean.target.disabled = true;
-              eClean.target.textContent = '清理中...';
-              setToolDetailStatusText('处理中：正在移除选中项...');
+              eClean.target.textContent = t('popup.tools.cleanRunning', null, 'Deleting...');
+              setToolDetailStatusText(t('popup.tools.scanCleanWorking', null, 'Working: removing selected items...'));
               let promises = Array.from(checkboxes).map(cb => {
                 return new Promise(res => chrome.bookmarks.removeTree(cb.getAttribute('data-id'), res));
               });
@@ -2135,7 +2535,7 @@ document.addEventListener('DOMContentLoaded', function () {
 
     if (btnBatchReplaceUrl) {
       btnBatchReplaceUrl.addEventListener('click', () => {
-        openToolView('批量替换 URL');
+        openToolView(t('popup.tools.batchReplaceTitle', null, 'Batch Replace URL'));
 
         // 隐藏默认操作区和状态区，使用自定义的流程式布局
         toolDetailMainAction.style.display = 'none';
@@ -2144,20 +2544,20 @@ document.addEventListener('DOMContentLoaded', function () {
         toolsResultList.innerHTML = `
           <!-- 规则配置区 -->
           <div id="urlReplaceRuleArea" class="url-replace-rule-area">
-            <div class="url-replace-title">查找与替换规则</div>
-            <input type="text" id="urlFindTarget" placeholder="查找内容 (例如: old-domain.com)" class="search-input url-replace-input" spellcheck="false" autocomplete="off">
-            <input type="text" id="urlReplaceTarget" placeholder="替换为 (留空表示删除匹配内容)" class="search-input url-replace-input" spellcheck="false" autocomplete="off">
-            <div class="url-replace-scope">作用范围：所有书签 URL</div>
+            <div class="url-replace-title">${escapeHtml(t('popup.tools.batchReplaceRuleTitle', null, 'Find and Replace Rule'))}</div>
+            <input type="text" id="urlFindTarget" placeholder="${escapeHtmlAttr(t('popup.tools.batchReplaceFindPlaceholder', null, 'Find text (for example: old-domain.com)'))}" class="search-input url-replace-input" spellcheck="false" autocomplete="off">
+            <input type="text" id="urlReplaceTarget" placeholder="${escapeHtmlAttr(t('popup.tools.batchReplaceReplacePlaceholder', null, 'Replace with (leave empty to remove matches)'))}" class="search-input url-replace-input" spellcheck="false" autocomplete="off">
+            <div class="url-replace-scope">${escapeHtml(t('popup.tools.batchReplaceScope', null, 'Scope: all bookmark URLs'))}</div>
             
-            <button id="btnStartUrlPreview" class="tool-btn tool-btn-primary url-replace-preview-btn" disabled>执行预演</button>
+            <button id="btnStartUrlPreview" class="tool-btn tool-btn-primary url-replace-preview-btn" disabled>${escapeHtml(t('popup.tools.batchReplacePreview', null, 'Preview Changes'))}</button>
           </div>
 
           <!-- 动态状态区 -->
           <div id="urlStatusArea" class="url-status-area">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="url-status-icon"><circle cx="12" cy="12" r="10"></circle><path d="M12 16v-4"></path><path d="M12 8h.01"></path></svg>
             <div>
-              <div class="url-status-heading">操作提示</div>
-              <div id="urlStatusText" class="url-status-text">请在上方输入查找内容和替换内容，然后点击"执行预演"</div>
+              <div class="url-status-heading">${escapeHtml(t('popup.tools.batchReplaceHintTitle', null, 'Hint'))}</div>
+              <div id="urlStatusText" class="url-status-text">${escapeHtml(t('popup.tools.batchReplaceHint', null, 'Enter find and replace text above, then click "Preview Changes".'))}</div>
             </div>
           </div>
 
@@ -2166,7 +2566,7 @@ document.addEventListener('DOMContentLoaded', function () {
         `;
 
         toolDetailWarning.style.display = 'block';
-        toolDetailWarning.innerHTML = '⚠️ <strong>风险提示：</strong> 正式替换不可撤销，请先执行预演并仔细确认结果。';
+        toolDetailWarning.innerHTML = t('popup.tools.batchReplaceWarning', null, '⚠️ <strong>Risk:</strong> replacement cannot be undone. Preview the results carefully first.');
 
         const ruleArea = document.getElementById('urlReplaceRuleArea');
         const findInput = document.getElementById('urlFindTarget');
@@ -2181,11 +2581,11 @@ document.addEventListener('DOMContentLoaded', function () {
           if (findInput.value.trim().length > 0) {
             previewBtn.disabled = false;
             statusText.style.color = 'var(--text-secondary)';
-            statusText.innerHTML = '已输入查找规则，点击"执行预演"查看将要被替换的链接。';
+            statusText.innerHTML = t('popup.tools.batchReplaceReadyHint', null, 'A find rule is ready. Click "Preview Changes" to inspect replacements.');
           } else {
             previewBtn.disabled = true;
             statusText.style.color = 'var(--text-secondary)';
-            statusText.innerHTML = '请在上方输入查找内容和替换内容，然后点击"执行预演"';
+            statusText.innerHTML = t('popup.tools.batchReplaceHint', null, 'Enter find and replace text above, then click "Preview Changes".');
           }
         });
 
@@ -2199,9 +2599,9 @@ document.addEventListener('DOMContentLoaded', function () {
           findInput.disabled = true;
           replaceInput.disabled = true;
           previewBtn.disabled = true;
-          previewBtn.textContent = '正在扫描...';
+          previewBtn.textContent = t('popup.tools.batchReplaceScanning', null, 'Scanning...');
           statusArea.style.color = 'var(--text-secondary)';
-          statusArea.innerHTML = '<div class="url-inline-spinner"><svg class="spin-icon" viewBox="0 0 24 24" fill="none" width="14" height="14" stroke="currentColor" stroke-width="2"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg> 正在预演替换结果...</div>';
+          statusArea.innerHTML = t('popup.tools.batchReplacePreviewing', null, '<div class="url-inline-spinner">Previewing...</div>');
           previewArea.style.display = 'none';
           toolDetailFooter.style.display = 'none';
 
@@ -2228,9 +2628,9 @@ document.addEventListener('DOMContentLoaded', function () {
                 findInput.disabled = false;
                 replaceInput.disabled = false;
                 previewBtn.disabled = false;
-                previewBtn.textContent = '执行预演';
+                previewBtn.textContent = t('popup.tools.batchReplacePreview', null, 'Preview Changes');
                 statusArea.style.color = 'var(--text-secondary)';
-                statusArea.innerHTML = '未找到可替换 URL';
+                statusArea.innerHTML = t('popup.tools.batchReplaceNone', null, 'No replaceable URLs found');
                 return;
               }
 
@@ -2246,18 +2646,18 @@ document.addEventListener('DOMContentLoaded', function () {
               let html = `<div class="url-preview-summary">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#d97706" stroke-width="2" class="url-preview-summary-icon"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="8" x2="12" y2="12"></line><line x1="12" y1="16" x2="12.01" y2="16"></line></svg>
             <div>
-              <div class="url-preview-summary-title">扫描结果</div>
-              <div class="url-preview-summary-text">找到 ${matches.length} 条可替换链接，请仔细确认以下变更记录：</div>
+              <div class="url-preview-summary-title">${escapeHtml(t('popup.tools.batchReplaceResultTitle', null, 'Scan Result'))}</div>
+              <div class="url-preview-summary-text">${escapeHtml(t('popup.tools.batchReplaceResultText', { count: matches.length }, `Found ${matches.length} replaceable URLs. Review the changes below carefully:`))}</div>
             </div>
           </div>`;
 
-              html += `<div class="url-preview-title">预览样例 (前 ${previewMatches.length} 条)</div>`;
+              html += `<div class="url-preview-title">${escapeHtml(t('popup.tools.batchReplacePreviewTitle', { count: previewMatches.length }, `Preview Sample (first ${previewMatches.length})`))}</div>`;
               html += `<div class="url-preview-list">`;
 
               previewMatches.forEach(m => {
                 html += `
                   <div class="url-preview-item">
-                    <div class="url-preview-item-title">${escapeHtml(m.node.title || '无标题')}</div>
+                    <div class="url-preview-item-title">${escapeHtml(m.node.title || t('common.untitled', null, 'Untitled'))}</div>
                     <div class="url-preview-old">- ${escapeHtml(m.oldUrl)}</div>
                     <div class="url-preview-new">+ ${escapeHtml(m.newUrl)}</div>
                   </div>
@@ -2265,7 +2665,7 @@ document.addEventListener('DOMContentLoaded', function () {
               });
 
               if (matches.length > maxPreview) {
-                html += `<div class="url-preview-more">...及其他 ${matches.length - maxPreview} 项</div>`;
+                html += `<div class="url-preview-more">${escapeHtml(t('popup.tools.batchReplaceMore', { count: matches.length - maxPreview }, `...and ${matches.length - maxPreview} more`))}</div>`;
               }
               html += `</div>`;
               previewArea.innerHTML = html;
@@ -2274,8 +2674,8 @@ document.addEventListener('DOMContentLoaded', function () {
               toolDetailFooter.style.display = 'flex';
               toolDetailFooter.style.gap = '12px';
               toolDetailFooter.innerHTML = `
-                <button id="btnEditRule" class="tool-btn tool-btn-secondary tool-flex-1">编辑规则</button>
-                <button id="btnConfirmReplace" class="tool-btn tool-btn-danger tool-flex-2">确认替换 ${matches.length} 条</button>
+                <button id="btnEditRule" class="tool-btn tool-btn-secondary tool-flex-1">${escapeHtml(t('popup.tools.batchReplaceEditRule', null, 'Edit Rule'))}</button>
+                <button id="btnConfirmReplace" class="tool-btn tool-btn-danger tool-flex-2">${escapeHtml(t('popup.tools.batchReplaceConfirm', { count: matches.length }, `Replace ${matches.length}`))}</button>
               `;
 
               // 返回编辑
@@ -2284,10 +2684,10 @@ document.addEventListener('DOMContentLoaded', function () {
                 findInput.disabled = false;
                 replaceInput.disabled = false;
                 previewBtn.disabled = false;
-                previewBtn.textContent = '重新预演';
+                previewBtn.textContent = t('popup.tools.batchReplaceRepreview', null, 'Preview Again');
 
                 statusArea.style.display = 'flex'; // Restore status area if needed or update text
-                statusText.innerHTML = '已返回编辑模式，修改规则后可重新预演。';
+                statusText.innerHTML = t('popup.tools.batchReplaceBackToEdit', null, 'Returned to edit mode. Adjust the rule and preview again.');
 
                 previewArea.style.display = 'none';
                 toolDetailFooter.style.display = 'none';
@@ -2297,15 +2697,18 @@ document.addEventListener('DOMContentLoaded', function () {
               document.getElementById('btnConfirmReplace').addEventListener('click', async (eConfirm) => {
                 const confirmBtn = eConfirm.target;
                 const editBtn = document.getElementById('btnEditRule');
-                if (!(await confirmDangerAction(`确定替换这 ${matches.length} 条 URL 吗？`, { okText: '替换' }))) return;
+                if (!(await confirmDangerAction(
+                  t('popup.tools.batchReplaceConfirmPrompt', { count: matches.length }, `Replace these ${matches.length} URLs?`),
+                  { okText: t('popup.tools.batchReplaceConfirmOk', null, 'Replace') }
+                ))) return;
 
                 confirmBtn.disabled = true;
                 editBtn.disabled = true;
-                confirmBtn.innerHTML = '<div class="url-inline-spinner"><svg class="spin-icon" viewBox="0 0 24 24" fill="none" width="14" height="14" stroke="currentColor" stroke-width="2"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg> 正在替换...</div>';
+                confirmBtn.innerHTML = t('popup.tools.batchReplaceRunning', null, '<div class="url-inline-spinner">Replacing...</div>');
 
                 statusArea.style.display = 'flex';
                 statusArea.style.color = 'var(--text-secondary)';
-                statusText.innerHTML = '正在执行替换...';
+                statusText.innerHTML = t('popup.tools.batchReplaceExecuting', null, 'Applying replacements...');
 
                 let promises = matches.map(m => {
                   return new Promise(res => chrome.bookmarks.update(m.node.id, { url: m.newUrl }, res));
@@ -2313,9 +2716,9 @@ document.addEventListener('DOMContentLoaded', function () {
 
                 Promise.all(promises).then(() => {
                   statusArea.style.color = '#34c759';
-                  statusText.innerHTML = `🎉 已成功替换 ${matches.length} 条 URL`;
+                  statusText.innerHTML = t('popup.tools.batchReplaceDone', { count: matches.length }, `🎉 Replaced ${matches.length} URLs successfully`);
 
-                  document.getElementById('statusReplaceUrl').textContent = `上次替换：${matches.length} 项`;
+                  document.getElementById('statusReplaceUrl').textContent = t('popup.tools.batchReplaceLastStatus', { count: matches.length }, `Last replace: ${matches.length} items`);
 
                   // 替换完成后保留状态，按钮变为"完成"返回
                   confirmBtn.style.display = 'none';
@@ -2324,7 +2727,7 @@ document.addEventListener('DOMContentLoaded', function () {
                   const doneBtn = document.createElement('button');
                   doneBtn.className = 'tool-btn tool-btn-primary';
                   doneBtn.classList.add('tool-flex-1');
-                  doneBtn.textContent = '完成并返回';
+                  doneBtn.textContent = t('popup.tools.batchReplaceDoneButton', null, 'Done');
                   doneBtn.onclick = () => {
                     closeToolView();
                     refreshView();
@@ -2352,7 +2755,7 @@ document.addEventListener('DOMContentLoaded', function () {
       || !bookmarkService.createBookmarkAsync
       || !bookmarkService.importNodesRecursive
     ) {
-      throw new Error('导入模块未加载');
+      throw new Error('Import module not loaded');
     }
     return bookmarkService;
   }
@@ -2364,40 +2767,41 @@ document.addEventListener('DOMContentLoaded', function () {
     try {
       const importService = getBookmarkImportService();
       toolDetailStatus.style.display = 'flex';
-      setToolDetailStatusText('状态：正在读取导入文件...');
-      setToolsResultMessage('正在解析文件...');
+      setToolDetailStatusText(t('popup.tools.importReading', null, 'Status: reading import file...'));
+      setToolsResultMessage(t('popup.tools.importParsing', null, 'Parsing file...'));
 
       const rawText = await importService.readFileAsText(file);
       const parsedNodes = importService.parseImportedHtmlBookmarks(rawText);
       const summary = importService.countImportableNodes(parsedNodes);
 
       if (summary.total === 0) {
-        setToolDetailStatusText('状态：未检测到可导入的书签条目', 'warning');
-        setToolsResultMessage('文件中没有可导入的数据');
+        setToolDetailStatusText(t('popup.tools.importEmpty', null, 'Status: no importable bookmark items detected'), 'warning');
+        setToolsResultMessage(t('popup.tools.importEmptyResult', null, 'No importable data found in this file'));
         return;
       }
 
       const shouldImport = await confirmDangerAction(
-        `将从 "${file.name}" 导入 ${summary.bookmarks} 个书签、${summary.folders} 个文件夹。`,
+        t('popup.tools.importPrompt', { file: file.name, bookmarks: summary.bookmarks, folders: summary.folders }, `Import ${summary.bookmarks} bookmarks and ${summary.folders} folders from "${file.name}"?`),
         {
-          title: '确认导入书签',
-          hint: '将自动创建一个导入文件夹，导入后可继续手动整理。',
-          okText: '开始导入',
+          title: t('popup.confirm.importTitle', null, 'Import Bookmarks'),
+          hint: t('popup.confirm.importHint', null, 'A new import folder will be created automatically so you can reorganize later.'),
+          okText: t('popup.confirm.importOk', null, 'Start Import'),
           variant: 'normal'
         }
       );
       if (!shouldImport) {
-        setToolDetailStatusText('状态：已取消导入');
+        setToolDetailStatusText(t('popup.tools.importCancelled', null, 'Status: import cancelled'));
         toolsResultList.innerHTML = '';
         return;
       }
 
       const importParentId = await importService.getImportParentId(chrome);
-      const baseName = (file.name || '书签').replace(/\.[^.]+$/, '').trim() || '书签';
+      const defaultBaseName = t('popup.tools.importDefaultBaseName', null, 'Bookmarks');
+      const baseName = (file.name || defaultBaseName).replace(/\.[^.]+$/, '').trim() || defaultBaseName;
       const stamp = new Date().toISOString().slice(0, 16).replace('T', ' ').replace(':', '-');
       const importFolder = await importService.createBookmarkAsync(chrome, {
         parentId: importParentId,
-        title: `Jade导入 · ${baseName} · ${stamp}`
+        title: t('popup.tools.importFolderName', { name: baseName, stamp }, `Jade Import · ${baseName} · ${stamp}`)
       });
 
       const stats = {
@@ -2408,31 +2812,32 @@ document.addEventListener('DOMContentLoaded', function () {
         total: summary.total
       };
 
-      setToolDetailStatusText('状态：正在导入 0%');
+      setToolDetailStatusText(t('popup.tools.importProgress', { percent: 0, processed: 0, total: Math.max(summary.total, 1) }, 'Status: importing 0%'));
       await importService.importNodesRecursive(chrome, importFolder.id, parsedNodes, stats, (processed, total) => {
         const safeTotal = Math.max(total, 1);
         const pct = Math.min(100, Math.round((processed / safeTotal) * 100));
-        setToolDetailStatusText(`状态：正在导入 ${pct}%（${processed}/${safeTotal}）`);
+        setToolDetailStatusText(t('popup.tools.importProgress', { percent: pct, processed, total: safeTotal }, `Status: importing ${pct}% (${processed}/${safeTotal})`));
       });
 
       invalidateBookmarkTreeCache();
       refreshView();
 
-      document.getElementById('statusImport').textContent = `上次导入：${stats.bookmarks} 书签 / ${stats.folders} 文件夹`;
-      setToolDetailStatusText(`状态：导入完成（成功 ${stats.bookmarks + stats.folders} 项，跳过 ${stats.skipped} 项）`, 'success');
+      document.getElementById('statusImport').textContent = t('popup.tools.importLastStatus', { bookmarks: stats.bookmarks, folders: stats.folders }, `Last import: ${stats.bookmarks} bookmarks / ${stats.folders} folders`);
+      setToolDetailStatusText(t('popup.tools.importDone', { success: stats.bookmarks + stats.folders, skipped: stats.skipped }, `Status: import complete (${stats.bookmarks + stats.folders} imported, ${stats.skipped} skipped)`), 'success');
       toolsResultList.innerHTML = `
         <div class="import-summary-card">
-          <div class="import-summary-title">导入目录：${escapeHtml(importFolder.title)}</div>
+          <div class="import-summary-title">${escapeHtml(t('popup.tools.importSummaryTitle', { title: importFolder.title }, `Imported into: ${importFolder.title}`))}</div>
           <div class="import-summary-meta">
-            成功导入书签：${stats.bookmarks}<br>
-            成功导入文件夹：${stats.folders}<br>
-            跳过条目：${stats.skipped}
+            ${escapeHtml(t('popup.tools.importSummaryBookmarks', { count: stats.bookmarks }, `Bookmarks imported: ${stats.bookmarks}`))}<br>
+            ${escapeHtml(t('popup.tools.importSummaryFolders', { count: stats.folders }, `Folders imported: ${stats.folders}`))}<br>
+            ${escapeHtml(t('popup.tools.importSummarySkipped', { count: stats.skipped }, `Skipped: ${stats.skipped}`))}
           </div>
         </div>
       `;
     } catch (err) {
-      setToolDetailStatusText(`状态：导入失败（${err.message || '未知错误'}）`, 'error');
-      setToolsResultMessage('导入失败，请检查文件格式是否为标准 HTML 书签文件', 'error');
+      const reason = err && err.message ? err.message : t('popup.reasons.unknown', null, 'Unknown reason');
+      setToolDetailStatusText(t('popup.tools.importFailed', { reason }, `Status: import failed (${reason})`), 'error');
+      setToolsResultMessage(t('popup.tools.importFailedResult', null, 'Import failed. Verify the file is a standard HTML bookmarks export.'), 'error');
     } finally {
       e.target.value = '';
     }
@@ -2480,11 +2885,11 @@ document.addEventListener('DOMContentLoaded', function () {
         saveAs: true
       }, () => {
         URL.revokeObjectURL(url);
-        setToolDetailStatusText('状态：导出成功', 'success');
-        setToolsResultMessage(`导出任务已提交 (${dateStr})`);
+        setToolDetailStatusText(t('popup.tools.exportDone', null, 'Status: export complete'), 'success');
+        setToolsResultMessage(t('popup.tools.exportQueued', { date: dateStr }, `Export started (${dateStr})`));
         if (btn) {
           btn.disabled = false;
-          btn.textContent = '重新导出';
+          btn.textContent = t('popup.tools.exportRetry', null, 'Export Again');
           btn.className = 'tool-btn tool-btn-secondary';
         }
       });

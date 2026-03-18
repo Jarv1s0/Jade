@@ -6,6 +6,19 @@
 (function () {
   'use strict';
 
+  const i18n = window.JadeI18n || null;
+  const t = (key, params, fallback) => (
+    i18n && typeof i18n.t === 'function'
+      ? i18n.t(key, params, fallback)
+      : (fallback || key)
+  );
+  const isZhLocale = !!(i18n && i18n.locale === 'zh_CN');
+
+  if (i18n && typeof i18n.apply === 'function') {
+    i18n.apply(document);
+    i18n.setDocumentTitle('newtab.pageTitle', null, 'New Tab');
+  }
+
   // =============================
   //  1. DOM 元素 & 常量
   // =============================
@@ -334,7 +347,7 @@
           return translatedArr.join(' ');
         }
       } catch (e) {
-        console.warn('MyMemory 翻译失败, 尝试 Google:', e);
+        console.warn('[NewTab] MyMemory translation failed, trying Google:', e);
       }
 
       try {
@@ -353,7 +366,7 @@
           return translatedText;
         }
       } catch (e) {
-        console.warn('Google 翻译失败', e);
+        console.warn('[NewTab] Google translation failed', e);
       }
       return '';
     },
@@ -395,13 +408,17 @@
         }
 
         // 尝试获取翻译
-        const [zhTitle, zhDetail] = await Promise.all([
-          this._translate(data.title),
-          this._translate(data.explanation)
-        ]);
+        let finalTitle = data.title || '';
+        let finalDetail = data.explanation || '';
 
-        const finalTitle = zhTitle ? `${zhTitle} | ${data.title}` : data.title || '';
-        const finalDetail = zhDetail ? `${zhDetail}<br><br><span style="color:var(--text-secondary);font-size:0.95em;opacity:0.8;">${data.explanation}</span>` : data.explanation || '';
+        if (isZhLocale) {
+          const [zhTitle, zhDetail] = await Promise.all([
+            this._translate(data.title),
+            this._translate(data.explanation)
+          ]);
+          finalTitle = zhTitle ? `${zhTitle} | ${data.title}` : data.title || '';
+          finalDetail = zhDetail ? `${zhDetail}<br><br><span style="color:var(--text-secondary);font-size:0.95em;opacity:0.8;">${data.explanation}</span>` : data.explanation || '';
+        }
 
         return {
           url: data.hdurl || data.url,
@@ -412,7 +429,7 @@
           _dateStr: `${y}${m}${d}`
         };
       }
-      throw new Error('NASA: 连续多天为视频，无法获取图片');
+      throw new Error('NASA returned video-only results for multiple days');
     },
 
     // ---- 3. Picsum 随机壁纸 ----
@@ -506,10 +523,10 @@
     const isFav = FavoritesManager.isFavorited(currentWallpaperData.url);
     if (isFav) {
       DOM.favBtn.classList.add('active');
-      DOM.favBtn.title = "取消收藏";
+      DOM.favBtn.title = t('newtab.unfavoriteWallpaper', null, 'Remove favorite');
     } else {
       DOM.favBtn.classList.remove('active');
-      DOM.favBtn.title = "收藏这张壁纸";
+      DOM.favBtn.title = t('newtab.favoriteWallpaper', null, 'Favorite this wallpaper');
     }
   }
 
@@ -533,9 +550,6 @@
           const href = el.getAttribute('href') || '';
           if (!/^https?:\/\//i.test(href)) {
             el.removeAttribute('href');
-          } else {
-            el.setAttribute('target', '_blank');
-            el.setAttribute('rel', 'noopener noreferrer');
           }
           return;
         }
@@ -580,7 +594,7 @@
             const applied = await applyWallpaper(cached, renderToken);
             if (applied) return;
           } catch (cacheErr) {
-            console.warn('[NewTab] 缓存壁纸加载失败，改为重新拉取:', cacheErr.message);
+            console.warn('[NewTab] Cached wallpaper failed to load, fetching again:', cacheErr.message);
           }
         }
       }
@@ -742,7 +756,7 @@
       DOM.clearFavoritesBtn.addEventListener('click', async (e) => {
         e.preventDefault();
         e.stopPropagation();
-        if (confirm('确定要清空所有收藏的壁纸吗？此操作不可撤销。')) {
+        if (confirm(t('newtab.clearFavoritesConfirm', null, 'Clear all favorited wallpapers? This cannot be undone.'))) {
           await FavoritesManager.clear();
           updateFavoriteButtonState();
           if (SettingsManager.settings.provider === 'favorites') {

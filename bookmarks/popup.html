@@ -3,7 +3,7 @@
 
 <head>
   <meta charset="UTF-8">
-  <title>Modern Bookmark Launcher</title>
+  <title>Jade Bookmark Launcher</title>
   <link rel="stylesheet" href="popup.css">
 </head>
 
@@ -16,19 +16,19 @@
   <main id="mainPanel">
     <!-- 2.1 我的置顶模块 -->
     <div id="frequentSection">
-      <div class="section-header">我的置顶</div>
+      <div class="section-header" data-i18n="popup.sections.frequent">我的置顶</div>
       <div class="frequent-grid" id="frequentGrid"></div>
     </div>
 
     <!-- 2.2 我的分组模块 -->
     <div id="categorySection">
-      <div class="section-header">我的分组</div>
+      <div class="section-header" data-i18n="popup.sections.groups">我的分组</div>
       <div class="category-grid" id="categoryGrid"></div>
     </div>
 
     <!-- 2.3 最近访问模块 -->
     <div id="recentSection" class="is-hidden">
-      <div class="section-header">最近访问</div>
+      <div class="section-header" data-i18n="popup.sections.recent">最近访问</div>
       <div class="recent-list" id="recentListView"></div>
     </div>
 
@@ -44,27 +44,27 @@
         <circle cx="11" cy="11" r="8"></circle>
         <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
       </svg>
-      <input type="text" class="search-input" id="searchInput" placeholder="搜索书签..." autocomplete="off"
+      <input type="text" class="search-input" id="searchInput" data-i18n-placeholder="popup.searchPlaceholder" placeholder="搜索书签..." autocomplete="off"
         spellcheck="false">
       <div class="shortcut-hint" id="shortcutHint">⌘K</div>
     </div>
 
     <div class="footer-actions">
-      <button class="footer-icon-btn" id="btnManageBookmarksBtn" title="书签管理">
+      <button class="footer-icon-btn" id="btnManageBookmarksBtn" data-i18n-title="popup.footer.manageBookmarks" title="书签管理">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
           stroke-linecap="round" stroke-linejoin="round">
           <path d="M4 19.5v-15A2.5 2.5 0 0 1 6.5 2H20v20H6.5a2.5 2.5 0 0 1 0-5H20"></path>
         </svg>
-        <span>书签管理</span>
+        <span data-i18n="popup.footer.manageBookmarks">书签管理</span>
       </button>
-      <button class="footer-icon-btn" id="btnToolsMain" title="书签工具箱">
+      <button class="footer-icon-btn" id="btnToolsMain" data-i18n-title="popup.tools.toolboxTitle" title="书签工具箱">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
           stroke-linecap="round" stroke-linejoin="round">
           <rect x="3" y="8" width="18" height="12" rx="2" ry="2"></rect>
           <path d="M7 8v-2a2 2 0 0 1 2-2h6a2 2 0 0 1 2 2v2"></path>
           <line x1="8" y1="14" x2="16" y2="14"></line>
         </svg>
-        <span>工具箱</span>
+        <span data-i18n="popup.footer.toolbox">工具箱</span>
       </button>
     </div>
   </footer>
@@ -80,7 +80,7 @@
             <polyline points="15 18 9 12 15 6"></polyline>
           </svg>
         </button>
-        <h3 id="toolsTitle" class="tools-title-centered">书签工具箱</h3>
+        <h3 id="toolsTitle" class="tools-title-centered" data-i18n="popup.tools.toolboxTitle">书签工具箱</h3>
         <button class="tools-icon-btn" id="toolsCloseBtn">
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
             stroke-linecap="round" stroke-linejoin="round">
@@ -95,7 +95,7 @@
         <div id="toolsMenuView" class="tools-view active">
           <!-- 分组: 数据管理 -->
           <div class="tool-group">
-            <div class="tool-group-title">数据管理</div>
+            <div class="tool-group-title" data-i18n="popup.tools.groupData">数据管理</div>
             <button class="tool-item" id="btnImportBookmarksNew">
               <div class="tool-item-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none"
                   stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -104,8 +104,8 @@
                   <line x1="12" y1="3" x2="12" y2="15"></line>
                 </svg></div>
               <div class="tool-item-info">
-                <span class="tool-item-title">导入书签</span>
-                <span class="tool-item-desc" id="statusImport">从 HTML 文件恢复书签数据</span>
+                <span class="tool-item-title" data-i18n="popup.tools.importTitle">导入书签</span>
+                <span class="tool-item-desc" id="statusImport" data-i18n="popup.tools.importDesc">从 HTML 文件恢复书签数据</span>
               </div>
             </button>
             <button class="tool-item" id="btnExportBookmarksNew">
@@ -116,15 +116,15 @@
                   <line x1="12" y1="15" x2="12" y2="3"></line>
                 </svg></div>
               <div class="tool-item-info">
-                <span class="tool-item-title">导出书签</span>
-                <span class="tool-item-desc" id="statusExport">备份所有书签为 HTML 格式</span>
+                <span class="tool-item-title" data-i18n="popup.tools.exportTitle">导出书签</span>
+                <span class="tool-item-desc" id="statusExport" data-i18n="popup.tools.exportDesc">备份所有书签为 HTML 格式</span>
               </div>
             </button>
           </div>
 
           <!-- 分组: 清理与维护 -->
           <div class="tool-group">
-            <div class="tool-group-title">清理与维护</div>
+            <div class="tool-group-title" data-i18n="popup.tools.groupCleanup">清理与维护</div>
             <button class="tool-item" id="btnFindDuplicates">
               <div class="tool-item-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none"
                   stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -132,8 +132,8 @@
                   <rect x="8" y="2" width="8" height="4" rx="1" ry="1"></rect>
                 </svg></div>
               <div class="tool-item-info">
-                <span class="tool-item-title">扫描重复</span>
-                <span class="tool-item-desc" id="statusDuplicates">查找并清理包含相同网址的书签</span>
+                <span class="tool-item-title" data-i18n="popup.tools.duplicatesTitle">扫描重复</span>
+                <span class="tool-item-desc" id="statusDuplicates" data-i18n="popup.tools.duplicatesDesc">查找并清理包含相同网址的书签</span>
               </div>
             </button>
             <button class="tool-item" id="btnFindBrokenLinks">
@@ -143,8 +143,8 @@
                   <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path>
                 </svg></div>
               <div class="tool-item-info">
-                <span class="tool-item-title">检查失效链接</span>
-                <span class="tool-item-desc" id="statusBrokenLinks">探测无法访问的书签链接</span>
+                <span class="tool-item-title" data-i18n="popup.tools.brokenTitle">检查失效链接</span>
+                <span class="tool-item-desc" id="statusBrokenLinks" data-i18n="popup.tools.brokenDesc">探测无法访问的书签链接</span>
               </div>
             </button>
             <button class="tool-item" id="btnCleanEmptyFolders">
@@ -154,15 +154,15 @@
                   <line x1="9" y1="14" x2="15" y2="14"></line>
                 </svg></div>
               <div class="tool-item-info">
-                <span class="tool-item-title">空文件夹</span>
-                <span class="tool-item-desc" id="statusEmptyFolders">清理不再包含任何子项的文件夹</span>
+                <span class="tool-item-title" data-i18n="popup.tools.emptyFoldersTitle">空文件夹</span>
+                <span class="tool-item-desc" id="statusEmptyFolders" data-i18n="popup.tools.emptyFoldersDesc">清理不再包含任何子项的文件夹</span>
               </div>
             </button>
           </div>
 
           <!-- 分组: 分析与高级 -->
           <div class="tool-group tool-group-last">
-            <div class="tool-group-title">分析与高级</div>
+            <div class="tool-group-title" data-i18n="popup.tools.groupAnalyze">分析与高级</div>
             <button class="tool-item" id="btnBookmarkStats">
               <div class="tool-item-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none"
                   stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -171,8 +171,8 @@
                   <line x1="6" y1="20" x2="6" y2="14"></line>
                 </svg></div>
               <div class="tool-item-info">
-                <span class="tool-item-title">统计报告</span>
-                <span class="tool-item-desc" id="statusStats">分析书签结构、层级及域名分布</span>
+                <span class="tool-item-title" data-i18n="popup.tools.statsTitle">统计报告</span>
+                <span class="tool-item-desc" id="statusStats" data-i18n="popup.tools.statsDesc">分析书签结构、层级及域名分布</span>
               </div>
             </button>
             <button class="tool-item" id="btnBatchReplaceUrl">
@@ -182,8 +182,8 @@
                   <path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"></path>
                 </svg></div>
               <div class="tool-item-info">
-                <span class="tool-item-title">批量替换 URL</span>
-                <span class="tool-item-desc" id="statusReplaceUrl">使用正则匹配并修改多个链接后缀</span>
+                <span class="tool-item-title" data-i18n="popup.tools.batchReplaceTitle">批量替换 URL</span>
+                <span class="tool-item-desc" id="statusReplaceUrl" data-i18n="popup.tools.batchReplaceDesc">使用正则匹配并修改多个链接后缀</span>
               </div>
             </button>
           </div>
@@ -220,17 +220,17 @@
       </div>
       <div class="modal-body">
         <div class="form-group">
-          <label>名称</label>
-          <input type="text" id="editTitleInput" placeholder="书签名称">
+          <label data-i18n="popup.edit.nameLabel">名称</label>
+          <input type="text" id="editTitleInput" data-i18n-placeholder="popup.edit.namePlaceholder" placeholder="书签名称">
         </div>
         <div class="form-group" id="editUrlGroup">
-          <label>网址</label>
-          <input type="text" id="editUrlInput" placeholder="https://...">
+          <label data-i18n="popup.edit.urlLabel">网址</label>
+          <input type="text" id="editUrlInput" data-i18n-placeholder="popup.edit.urlPlaceholder" placeholder="https://...">
         </div>
       </div>
       <div class="modal-footer">
-        <button class="footer-icon-btn" id="editCancelBtn">取消</button>
-        <button class="footer-icon-btn primary-btn" id="editSaveBtn">保存</button>
+        <button class="footer-icon-btn" id="editCancelBtn" data-i18n="common.cancel">取消</button>
+        <button class="footer-icon-btn primary-btn" id="editSaveBtn" data-i18n="common.save">保存</button>
       </div>
     </div>
   </div>
@@ -239,40 +239,41 @@
   <div class="modal confirm-modal" id="confirmModal">
     <div class="modal-content small confirm-modal-content">
       <div class="modal-header">
-        <h2 id="confirmModalTitle">确认操作</h2>
+        <h2 id="confirmModalTitle" data-i18n="popup.confirm.defaultTitle">确认操作</h2>
       </div>
       <div class="modal-body">
         <div id="confirmModalMessage" class="confirm-message"></div>
-        <div id="confirmModalHint" class="confirm-hint">此操作不可撤销，是否继续？</div>
+        <div id="confirmModalHint" class="confirm-hint" data-i18n="popup.confirm.defaultHint">此操作不可撤销，是否继续？</div>
       </div>
       <div class="modal-footer confirm-actions">
-        <button class="footer-icon-btn" id="confirmCancelBtn" type="button">取消</button>
-        <button class="footer-icon-btn primary-btn" id="confirmOkBtn" type="button">继续</button>
+        <button class="footer-icon-btn" id="confirmCancelBtn" type="button" data-i18n="common.cancel">取消</button>
+        <button class="footer-icon-btn primary-btn" id="confirmOkBtn" type="button" data-i18n="common.continue">继续</button>
       </div>
     </div>
   </div>
 
   <!-- 上下文菜单 -->
   <div id="contextMenu" class="context-menu">
-    <div class="menu-item" id="menuPin">添加到我的置顶</div>
-    <div class="menu-item is-hidden" id="menuAddToGroup">添加到我的分组</div>
-    <div class="menu-item" id="menuSortName">按名称排序</div>
-    <div class="menu-item" id="menuSortTime">按时间排序</div>
-    <div class="menu-item is-hidden" id="menuRemoveRecent">从最近访问列表移除</div>
+    <div class="menu-item" id="menuPin" data-i18n="popup.contextMenu.addToPinned">添加到我的置顶</div>
+    <div class="menu-item is-hidden" id="menuAddToGroup" data-i18n="popup.contextMenu.addToGroup">添加到我的分组</div>
+    <div class="menu-item" id="menuSortName" data-i18n="popup.contextMenu.sortByName">按名称排序</div>
+    <div class="menu-item" id="menuSortTime" data-i18n="popup.contextMenu.sortByTime">按时间排序</div>
+    <div class="menu-item is-hidden" id="menuRemoveRecent" data-i18n="popup.contextMenu.removeFromRecent">从最近访问列表移除</div>
     <div class="menu-divider" id="menuDivider1"></div>
-    <div class="menu-item" id="menuEdit">编辑</div>
-    <div class="menu-item danger" id="menuDelete">删除</div>
+    <div class="menu-item" id="menuEdit" data-i18n="popup.contextMenu.edit">编辑</div>
+    <div class="menu-item danger" id="menuDelete" data-i18n="popup.contextMenu.delete">删除</div>
   </div>
 
   <!-- 全局 Toast 提示 -->
   <div id="toast" class="toast">
     <span id="toastMsg"></span>
-    <button id="toastAction" class="toast-action is-hidden">撤销</button>
+    <button id="toastAction" class="toast-action is-hidden" data-i18n="common.undo">撤销</button>
   </div>
 
   <!-- 隐藏的 File Input 用于导入 -->
   <input type="file" id="importFileInput" class="is-hidden" accept=".html,.htm">
 
+  <script src="../shared/i18n.js"></script>
   <script src="modules/bookmark-service.js"></script>
   <script src="modules/dashboard.js"></script>
   <script src="modules/context-menu.js"></script>

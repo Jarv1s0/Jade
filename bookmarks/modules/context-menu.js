@@ -1,8 +1,15 @@
 (function initContextMenuModule(global) {
   'use strict';
 
+  const i18n = global.JadeI18n || null;
+  const t = (key, params, fallback) => (
+    i18n && typeof i18n.t === 'function'
+      ? i18n.t(key, params, fallback)
+      : (fallback || key)
+  );
+
   function resolveVisibility(args) {
-    const activeId = args.targetNodeId || args.targetNodeDomain;
+    const activeId = args.targetNodePinKey || args.targetNodeId || args.targetNodeDomain;
     const isRecent = !!args.isRecent;
     const isFolder = !!args.isFolder;
     const isFrequent = !!args.isFrequent;
@@ -10,7 +17,9 @@
 
     return {
       showPin: !isRecent,
-      pinText: pinnedIds.has(activeId) ? '从我的置顶移除' : '添加到我的置顶',
+      pinText: pinnedIds.has(activeId)
+        ? t('popup.contextMenu.removeFromPinned', null, 'Remove from Pinned')
+        : t('popup.contextMenu.addToPinned', null, 'Add to Pinned'),
       showSortName: isFolder && !isRecent,
       showSortTime: isFolder && !isRecent,
       showEdit: (args.targetNodeId || isFrequent) && !isRecent,

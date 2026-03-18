@@ -1,6 +1,13 @@
 (function initBookmarkService(global) {
   'use strict';
 
+  const i18n = global.JadeI18n || null;
+  const t = (key, params, fallback) => (
+    i18n && typeof i18n.t === 'function'
+      ? i18n.t(key, params, fallback)
+      : (fallback || key)
+  );
+
   function createTreeCache(chromeApi) {
     const cache = { data: null, inFlight: null };
 
@@ -72,7 +79,7 @@
     return new Promise((resolve, reject) => {
       const reader = new FileReader();
       reader.onload = () => resolve(String(reader.result || ''));
-      reader.onerror = () => reject(new Error('读取文件失败'));
+      reader.onerror = () => reject(new Error('Failed to read file'));
       reader.readAsText(file);
     });
   }
@@ -90,7 +97,7 @@
         const url = (linkEl.getAttribute('href') || '').trim();
         if (url) {
           items.push({
-            title: (linkEl.textContent || '').trim() || '未命名书签',
+            title: (linkEl.textContent || '').trim() || t('common.untitledBookmark', null, 'Untitled bookmark'),
             url
           });
         }
@@ -107,7 +114,7 @@
       }
 
       items.push({
-        title: (folderTitleEl.textContent || '').trim() || '未命名文件夹',
+        title: (folderTitleEl.textContent || '').trim() || t('common.untitledFolder', null, 'Untitled folder'),
         children: parseBookmarkDlElement(subDl)
       });
     }
@@ -117,7 +124,7 @@
   function parseImportedHtmlBookmarks(rawHtml) {
     const doc = new DOMParser().parseFromString(rawHtml, 'text/html');
     const rootDl = doc.querySelector('dl');
-    if (!rootDl) throw new Error('未识别为标准书签 HTML（Netscape）文件');
+    if (!rootDl) throw new Error('Unrecognized bookmark HTML (Netscape format expected)');
     return parseBookmarkDlElement(rootDl);
   }
 
@@ -187,7 +194,7 @@
 
       if (node.url) {
         try {
-          await createBookmarkAsync(chromeApi, { parentId, title: node.title || '未命名书签', url: node.url });
+          await createBookmarkAsync(chromeApi, { parentId, title: node.title || t('common.untitledBookmark', null, 'Untitled bookmark'), url: node.url });
           stats.bookmarks++;
         } catch (_) {
           stats.skipped++;
@@ -198,7 +205,7 @@
       }
 
       try {
-        const folder = await createBookmarkAsync(chromeApi, { parentId, title: node.title || '未命名文件夹' });
+        const folder = await createBookmarkAsync(chromeApi, { parentId, title: node.title || t('common.untitledFolder', null, 'Untitled folder') });
         stats.folders++;
         stats.processed++;
         if (onProgress) onProgress(stats.processed, stats.total);
