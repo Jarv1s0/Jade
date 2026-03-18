@@ -2,7 +2,7 @@
     "manifest_version": 3,
     "default_locale": "zh_CN",
     "name": "__MSG_extName__",
-    "version": "1.0",
+    "version": "1.1",
     "description": "__MSG_extDescription__",
     "permissions": [
         "bookmarks",
@@ -16,6 +16,8 @@
     ],
     "host_permissions": [
         "https://bing.ee123.net/*",
+        "https://www.bing.com/*",
+        "https://global.bing.com/*",
         "https://api.nasa.gov/*",
         "https://picsum.photos/*",
         "https://translate.googleapis.com/*",

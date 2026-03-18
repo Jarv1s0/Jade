@@ -40,8 +40,9 @@
   };
 
   const CONSTANTS = {
-    BING_API: 'https://bing.ee123.net/img/',
-    BING_API_RAND: 'https://bing.ee123.net/img/rand',
+    BING_API_ZH: 'https://bing.ee123.net/img/',
+    BING_API_EN: 'https://global.bing.com/HPImageArchive.aspx',
+    BING_API_ROOT_EN: 'https://www.bing.com',
     NASA_API: 'https://api.nasa.gov/planetary/apod?api_key=0MsI7Uti0ePSZuLvN2ZOJq4C2f4PaQjbBKPq1yQs',
     CACHE_KEYS: {
       SETTINGS: 'newtab_settings',
@@ -68,6 +69,29 @@
       IMAGE_RETRY_DELAY_MS: 300
     }
   };
+
+  function getBingLocaleConfig() {
+    if (isZhLocale) {
+      return {
+        mode: 'ee123',
+        market: 'zh-CN'
+      };
+    }
+
+    return {
+      mode: 'official',
+      market: 'en-US'
+    };
+  }
+
+  function getBingVariantKey() {
+    const config = getBingLocaleConfig();
+    return `${config.mode}:${config.market}`;
+  }
+
+  function containsCjk(text) {
+    return /[\u3400-\u9FFF]/.test(String(text || ''));
+  }
 
   // 当前壁纸的元数据（用于收藏）
   let currentWallpaperData = null;
@@ -290,29 +314,86 @@
       const dateStr = targetDate.getFullYear().toString() +
         String(targetDate.getMonth() + 1).padStart(2, '0') +
         String(targetDate.getDate()).padStart(2, '0');
+      const bingConfig = getBingLocaleConfig();
 
-      const fetchUrl = `${CONSTANTS.BING_API}?date=${dateStr}&size=UHD&type=json`;
+      if (bingConfig.mode === 'ee123') {
+        const fetchUrl = `${CONSTANTS.BING_API_ZH}?date=${dateStr}&size=UHD&type=json`;
 
+        const response = await fetchWithRetry(fetchUrl);
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const data = await response.json();
+        const imageUrl = data.imgurl || data.imgurl_d || data.url;
+        if (!imageUrl) throw new Error('No image data');
+
+        return this._localizeBingContent({
+          url: imageUrl,
+          copyright: data.imgcopyright || data.imgtitle || 'Bing Wallpaper',
+          title: data.imgtitle || '',
+          show: data.imgshow || '',
+          detail: data.imgdetail || '',
+          provider: 'bing',
+          _dateStr: dateStr,
+          _bingVariant: getBingVariantKey()
+        });
+      }
+
+      const officialOffset = Math.min(this._bingDateOffset, 7);
+      this._bingDateOffset = officialOffset;
+      const fetchUrl = `${CONSTANTS.BING_API_EN}?format=js&idx=${officialOffset}&n=1&pid=hp&FORM=BEHPTB&uhd=1&uhdwidth=3840&uhdheight=2160&setmkt=${encodeURIComponent(bingConfig.market.toLowerCase())}&setlang=en-us`;
       const response = await fetchWithRetry(fetchUrl);
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       const data = await response.json();
-      const imageUrl = data.imgurl || data.imgurl_d || data.url;
-      if (!imageUrl) throw new Error('No image data');
+      const image = Array.isArray(data.images) ? data.images[0] : null;
+      if (!image) throw new Error('No image data');
+
+      const imageUrl = image.url
+        ? `${CONSTANTS.BING_API_ROOT_EN}${image.url}`
+        : (image.urlbase ? `${CONSTANTS.BING_API_ROOT_EN}${image.urlbase}_UHD.jpg` : '');
+      if (!imageUrl) throw new Error('No image url');
+
+      const title = image.title || '';
+      const copyright = image.copyright || title || 'Bing Wallpaper';
+
+      return this._localizeBingContent({
+        url: imageUrl,
+        copyright,
+        title,
+        show: '',
+        detail: image.copyright && image.copyright !== image.title ? image.copyright : '',
+        provider: 'bing',
+        _dateStr: image.startdate || dateStr,
+        _bingVariant: getBingVariantKey()
+      });
+    },
+
+    async _localizeBingContent(payload) {
+      if (!payload || isZhLocale) return payload;
+
+      const needsTranslation = [payload.title, payload.show, payload.detail, payload.copyright].some(containsCjk);
+      if (!needsTranslation) return payload;
+
+      const [title, show, detail, copyright] = await Promise.all([
+        this._translate(payload.title, { sourceLang: 'auto', targetLang: 'en' }),
+        this._translate(payload.show, { sourceLang: 'auto', targetLang: 'en' }),
+        this._translate(payload.detail, { sourceLang: 'auto', targetLang: 'en' }),
+        this._translate(payload.copyright, { sourceLang: 'auto', targetLang: 'en' })
+      ]);
 
       return {
-        url: imageUrl,
-        copyright: data.imgcopyright || data.imgtitle || 'Bing Wallpaper',
-        title: data.imgtitle || '',
-        show: data.imgshow || '',
-        detail: data.imgdetail || '',
-        provider: 'bing',
-        _dateStr: dateStr
+        ...payload,
+        title: title || payload.title,
+        show: show || payload.show,
+        detail: detail || payload.detail,
+        copyright: copyright || payload.copyright
       };
     },
 
         // --- 简单的免费翻译接口辅助函数 (Google App Script 或直接调用公开接口) ---
-    async _translate(text) {
+    async _translate(text, options = {}) {
       if (!text) return '';
+      const sourceLang = options.sourceLang || 'en';
+      const targetLang = options.targetLang || 'zh-CN';
+
       try {
         // MyMemory API 限制单次 500 字符。如果超长，则按句号切分再合并
         let chunks = [];
@@ -334,7 +415,7 @@
 
         let translatedArr = [];
         for (let chunk of chunks) {
-          const res = await fetch(`https://api.mymemory.translated.net/get?q=${encodeURIComponent(chunk)}&langpair=en|zh-CN`);
+          const res = await fetch(`https://api.mymemory.translated.net/get?q=${encodeURIComponent(chunk)}&langpair=${encodeURIComponent(sourceLang)}|${encodeURIComponent(targetLang)}`);
           if (res.ok) {
             const json = await res.json();
             if (json && json.responseData && json.responseData.translatedText && !json.responseData.translatedText.includes('QUERY LENGTH LIMIT')) {
@@ -353,7 +434,7 @@
       try {
         // 后备：Google 免费接口
         const t = text.substring(0, 500); // 防超长
-        const url = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=en&tl=zh-CN&dt=t&q=${encodeURIComponent(t)}`;
+        const url = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=${encodeURIComponent(sourceLang)}&tl=${encodeURIComponent(targetLang)}&dt=t&q=${encodeURIComponent(t)}`;
         const res = await fetch(url);
         if (res.ok) {
           const json = await res.json();
@@ -584,8 +665,10 @@
       const cached = await Cache.get(CONSTANTS.CACHE_KEYS.CURRENT_WALLPAPER, ttl);
       // 如果 Provider 切了或者存在，先使用它
       if (cached && cached.provider === providerKey) {
+        const cacheMatchesBingVariant = providerKey !== 'bing' || cached._bingVariant === getBingVariantKey();
+
         // 对收藏检查是否被移除了
-        if (providerKey !== 'favorites' || FavoritesManager.isFavorited(cached.url)) {
+        if (cacheMatchesBingVariant && (providerKey !== 'favorites' || FavoritesManager.isFavorited(cached.url))) {
           // 恢复缓存对应的偏移量，防止新开标签页后点击刷新跳回最新天数
           if (cached._bingDateOffset !== undefined) WallpaperProviders._bingDateOffset = cached._bingDateOffset;
           if (cached._nasaDateOffset !== undefined) WallpaperProviders._nasaDateOffset = cached._nasaDateOffset;
