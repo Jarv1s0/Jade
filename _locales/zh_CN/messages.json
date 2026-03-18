@@ -1,11 +1,11 @@
 {
   "appName": {
-    "message": "Jade - 书签管理与新标签页助手"
+    "message": "Jade - 书签管理与新标签页"
   },
   "extName": {
-    "message": "Jade - 书签管理与新标签页助手"
+    "message": "Jade - 书签管理与新标签页"
   },
   "extDescription": {
-    "message": "一款极简、高效的 Chrome 书签管理工具，支持自定义新标签页，助你重塑浏览器工作流。"
+    "message": "Chrome 书签管理、新标签页壁纸、重复书签清理与失效链接检测。"
   }
 }
