@@ -99,6 +99,8 @@ document.addEventListener('DOMContentLoaded', function () {
   const dashboardModule = modules.dashboard || null;
   const contextMenuModule = modules.contextMenu || null;
   const toolsModule = modules.tools || null;
+  const toolboxViewModule = modules.toolboxView || null;
+  const urlReplaceToolModule = modules.urlReplaceTool || null;
   const bookmarkTreeCacheManager = bookmarkService && bookmarkService.createTreeCache
     ? bookmarkService.createTreeCache(chrome)
     : null;
@@ -1082,7 +1084,6 @@ document.addEventListener('DOMContentLoaded', function () {
       previewHtml += `
             <div class="cat-preview-item">
               <img src="chrome-extension://${chrome.runtime.id}/_favicon/?pageUrl=${encodeURIComponent(item.url)}&size=32"
-                   onerror="this.src='https://www.google.com/s2/favicons?domain=${domain}&sz=32'"
                    class="cat-preview-icon">
               <span class="cat-preview-text">${escapeHtml(shortName)}</span>
             </div>
@@ -1100,6 +1101,13 @@ document.addEventListener('DOMContentLoaded', function () {
                 ${previewHtml}
             </div>
         `;
+
+    card.querySelectorAll('.cat-preview-icon').forEach((img, index) => {
+      const item = previewItems[index];
+      if (!item) return;
+      const domain = new URL(item.url || 'about:blank').hostname;
+      bindFaviconFallback(img, domain, 32);
+    });
 
     card.onclick = () => {
       enterFolder(folder.id, folder.title, folder.isUncategorized);
@@ -1380,7 +1388,7 @@ document.addEventListener('DOMContentLoaded', function () {
            </div>`
         : `<div class="bookmark-icon">
             <img src="chrome-extension://${chrome.runtime.id}/_favicon/?pageUrl=${encodeURIComponent(item.url)}&size=64"
-                 onerror="this.src='https://www.google.com/s2/favicons?domain=${domain}&sz=64'">
+                 alt="">
            </div>`;
 
       const displayTitle = item.title || (isFolder
@@ -1399,6 +1407,13 @@ document.addEventListener('DOMContentLoaded', function () {
           ${metaSpan}
         </div>
       `;
+
+      if (!isFolder) {
+        const iconImg = a.querySelector('.bookmark-icon img');
+        if (iconImg) {
+          bindFaviconFallback(iconImg, domain, 64);
+        }
+      }
 
       a.onclick = (e) => {
         e.preventDefault();
@@ -1932,40 +1947,54 @@ document.addEventListener('DOMContentLoaded', function () {
   const toolDetailMainAction = document.getElementById('toolDetailMainAction');
   const toolDetailWarning = document.getElementById('toolDetailWarning');
   const toolDetailFooter = document.getElementById('toolDetailFooter');
+  const toolboxViewController = toolboxViewModule && toolboxViewModule.createToolboxViewController
+    ? toolboxViewModule.createToolboxViewController({
+      t,
+      toolsTitle,
+      toolsBackBtn,
+      toolsMenuView,
+      toolsDetailView,
+      toolsResultList,
+      toolDetailStatus,
+      toolDetailMainAction,
+      toolDetailWarning,
+      toolDetailFooter,
+      cancelBrokenLinkScanSilently
+    })
+    : null;
 
   function openToolView(titleStr) {
-    toolsMenuView.classList.remove('active');
-    toolsDetailView.classList.add('active');
-    toolsMenuView.style.display = 'none';
-    toolsDetailView.style.display = 'block';
-
-    toolsTitle.textContent = titleStr;
-    toolsBackBtn.style.visibility = 'visible';
-
-    toolDetailStatus.style.display = 'none';
-    toolDetailStatus.innerHTML = '';
-    toolDetailMainAction.innerHTML = '';
-    toolDetailWarning.style.display = 'none';
-    toolDetailWarning.innerHTML = '';
-    toolDetailFooter.style.display = 'none';
-    toolDetailFooter.innerHTML = '';
-    toolsResultList.innerHTML = '';
+    if (!toolboxViewController) return;
+    toolboxViewController.openToolView(titleStr);
   }
 
   function closeToolView() {
-    cancelBrokenLinkScanSilently();
-    toolsDetailView.classList.remove('active');
-    toolsMenuView.classList.add('active');
-    toolsDetailView.style.display = 'none';
-    toolsMenuView.style.display = 'block';
-
-    toolsTitle.textContent = t('popup.tools.toolboxTitle', null, 'Bookmark Toolbox');
-    toolsBackBtn.style.visibility = 'hidden';
-    toolsResultList.innerHTML = '';
+    if (!toolboxViewController) return;
+    toolboxViewController.closeToolView();
   }
 
   function setupToolsListeners() {
     importFileInput.addEventListener('change', handleImport);
+
+    if (urlReplaceToolModule && urlReplaceToolModule.bindUrlReplaceTool) {
+      urlReplaceToolModule.bindUrlReplaceTool({
+        chromeApi: chrome,
+        t,
+        escapeHtml,
+        escapeHtmlAttr,
+        btnBatchReplaceUrl,
+        toolDetailMainAction,
+        toolDetailStatus,
+        toolDetailWarning,
+        toolDetailFooter,
+        toolsResultList,
+        getBookmarkTreeCached,
+        confirmDangerAction,
+        refreshView,
+        openToolView,
+        closeToolView
+      });
+    }
 
     // 0. 导入书签
     if (btnImportBookmarksNew) {
@@ -2533,215 +2562,6 @@ document.addEventListener('DOMContentLoaded', function () {
       });
     }
 
-    if (btnBatchReplaceUrl) {
-      btnBatchReplaceUrl.addEventListener('click', () => {
-        openToolView(t('popup.tools.batchReplaceTitle', null, 'Batch Replace URL'));
-
-        // 隐藏默认操作区和状态区，使用自定义的流程式布局
-        toolDetailMainAction.style.display = 'none';
-        toolDetailStatus.style.display = 'none';
-
-        toolsResultList.innerHTML = `
-          <!-- 规则配置区 -->
-          <div id="urlReplaceRuleArea" class="url-replace-rule-area">
-            <div class="url-replace-title">${escapeHtml(t('popup.tools.batchReplaceRuleTitle', null, 'Find and Replace Rule'))}</div>
-            <input type="text" id="urlFindTarget" placeholder="${escapeHtmlAttr(t('popup.tools.batchReplaceFindPlaceholder', null, 'Find text (for example: old-domain.com)'))}" class="search-input url-replace-input" spellcheck="false" autocomplete="off">
-            <input type="text" id="urlReplaceTarget" placeholder="${escapeHtmlAttr(t('popup.tools.batchReplaceReplacePlaceholder', null, 'Replace with (leave empty to remove matches)'))}" class="search-input url-replace-input" spellcheck="false" autocomplete="off">
-            <div class="url-replace-scope">${escapeHtml(t('popup.tools.batchReplaceScope', null, 'Scope: all bookmark URLs'))}</div>
-            
-            <button id="btnStartUrlPreview" class="tool-btn tool-btn-primary url-replace-preview-btn" disabled>${escapeHtml(t('popup.tools.batchReplacePreview', null, 'Preview Changes'))}</button>
-          </div>
-
-          <!-- 动态状态区 -->
-          <div id="urlStatusArea" class="url-status-area">
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="url-status-icon"><circle cx="12" cy="12" r="10"></circle><path d="M12 16v-4"></path><path d="M12 8h.01"></path></svg>
-            <div>
-              <div class="url-status-heading">${escapeHtml(t('popup.tools.batchReplaceHintTitle', null, 'Hint'))}</div>
-              <div id="urlStatusText" class="url-status-text">${escapeHtml(t('popup.tools.batchReplaceHint', null, 'Enter find and replace text above, then click "Preview Changes".'))}</div>
-            </div>
-          </div>
-
-          <!-- 预演结果展示区 -->
-          <div id="urlPreviewArea" class="url-preview-area is-hidden"></div>
-        `;
-
-        toolDetailWarning.style.display = 'block';
-        toolDetailWarning.innerHTML = t('popup.tools.batchReplaceWarning', null, '⚠️ <strong>Risk:</strong> replacement cannot be undone. Preview the results carefully first.');
-
-        const ruleArea = document.getElementById('urlReplaceRuleArea');
-        const findInput = document.getElementById('urlFindTarget');
-        const replaceInput = document.getElementById('urlReplaceTarget');
-        const previewBtn = document.getElementById('btnStartUrlPreview');
-        const statusArea = document.getElementById('urlStatusArea');
-        const statusText = document.getElementById('urlStatusText');
-        const previewArea = document.getElementById('urlPreviewArea');
-
-        // 监听输入，控制预演按钮状态
-        findInput.addEventListener('input', () => {
-          if (findInput.value.trim().length > 0) {
-            previewBtn.disabled = false;
-            statusText.style.color = 'var(--text-secondary)';
-            statusText.innerHTML = t('popup.tools.batchReplaceReadyHint', null, 'A find rule is ready. Click "Preview Changes" to inspect replacements.');
-          } else {
-            previewBtn.disabled = true;
-            statusText.style.color = 'var(--text-secondary)';
-            statusText.innerHTML = t('popup.tools.batchReplaceHint', null, 'Enter find and replace text above, then click "Preview Changes".');
-          }
-        });
-
-        previewBtn.addEventListener('click', () => {
-          const findStr = findInput.value;
-          const replaceStr = replaceInput.value;
-
-          if (!findStr) return;
-
-          // 预演中状态
-          findInput.disabled = true;
-          replaceInput.disabled = true;
-          previewBtn.disabled = true;
-          previewBtn.textContent = t('popup.tools.batchReplaceScanning', null, 'Scanning...');
-          statusArea.style.color = 'var(--text-secondary)';
-          statusArea.innerHTML = t('popup.tools.batchReplacePreviewing', null, '<div class="url-inline-spinner">Previewing...</div>');
-          previewArea.style.display = 'none';
-          toolDetailFooter.style.display = 'none';
-
-          // 模拟稍微的延迟体现扫描过程
-          setTimeout(() => {
-            getBookmarkTreeCached((tree) => {
-              let matches = [];
-              function traverse(nodes) {
-                nodes.forEach(node => {
-                  if (node.url && node.url.includes(findStr)) {
-                    matches.push({
-                      node: node,
-                      oldUrl: node.url,
-                      newUrl: node.url.split(findStr).join(replaceStr)
-                    });
-                  }
-                  if (node.children) traverse(node.children);
-                });
-              }
-              traverse(tree);
-
-              if (matches.length === 0) {
-                // 无结果恢复状态
-                findInput.disabled = false;
-                replaceInput.disabled = false;
-                previewBtn.disabled = false;
-                previewBtn.textContent = t('popup.tools.batchReplacePreview', null, 'Preview Changes');
-                statusArea.style.color = 'var(--text-secondary)';
-                statusArea.innerHTML = t('popup.tools.batchReplaceNone', null, 'No replaceable URLs found');
-                return;
-              }
-
-              // 预演完成，有结果
-              ruleArea.style.display = 'none';
-              statusArea.style.display = 'none';
-
-              previewArea.style.display = 'flex';
-
-              const maxPreview = 5;
-              const previewMatches = matches.slice(0, maxPreview);
-
-              let html = `<div class="url-preview-summary">
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#d97706" stroke-width="2" class="url-preview-summary-icon"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="8" x2="12" y2="12"></line><line x1="12" y1="16" x2="12.01" y2="16"></line></svg>
-            <div>
-              <div class="url-preview-summary-title">${escapeHtml(t('popup.tools.batchReplaceResultTitle', null, 'Scan Result'))}</div>
-              <div class="url-preview-summary-text">${escapeHtml(t('popup.tools.batchReplaceResultText', { count: matches.length }, `Found ${matches.length} replaceable URLs. Review the changes below carefully:`))}</div>
-            </div>
-          </div>`;
-
-              html += `<div class="url-preview-title">${escapeHtml(t('popup.tools.batchReplacePreviewTitle', { count: previewMatches.length }, `Preview Sample (first ${previewMatches.length})`))}</div>`;
-              html += `<div class="url-preview-list">`;
-
-              previewMatches.forEach(m => {
-                html += `
-                  <div class="url-preview-item">
-                    <div class="url-preview-item-title">${escapeHtml(m.node.title || t('common.untitled', null, 'Untitled'))}</div>
-                    <div class="url-preview-old">- ${escapeHtml(m.oldUrl)}</div>
-                    <div class="url-preview-new">+ ${escapeHtml(m.newUrl)}</div>
-                  </div>
-                `;
-              });
-
-              if (matches.length > maxPreview) {
-                html += `<div class="url-preview-more">${escapeHtml(t('popup.tools.batchReplaceMore', { count: matches.length - maxPreview }, `...and ${matches.length - maxPreview} more`))}</div>`;
-              }
-              html += `</div>`;
-              previewArea.innerHTML = html;
-
-              // 显示底部操作区
-              toolDetailFooter.style.display = 'flex';
-              toolDetailFooter.style.gap = '12px';
-              toolDetailFooter.innerHTML = `
-                <button id="btnEditRule" class="tool-btn tool-btn-secondary tool-flex-1">${escapeHtml(t('popup.tools.batchReplaceEditRule', null, 'Edit Rule'))}</button>
-                <button id="btnConfirmReplace" class="tool-btn tool-btn-danger tool-flex-2">${escapeHtml(t('popup.tools.batchReplaceConfirm', { count: matches.length }, `Replace ${matches.length}`))}</button>
-              `;
-
-              // 返回编辑
-              document.getElementById('btnEditRule').addEventListener('click', () => {
-                ruleArea.style.display = 'flex';
-                findInput.disabled = false;
-                replaceInput.disabled = false;
-                previewBtn.disabled = false;
-                previewBtn.textContent = t('popup.tools.batchReplaceRepreview', null, 'Preview Again');
-
-                statusArea.style.display = 'flex'; // Restore status area if needed or update text
-                statusText.innerHTML = t('popup.tools.batchReplaceBackToEdit', null, 'Returned to edit mode. Adjust the rule and preview again.');
-
-                previewArea.style.display = 'none';
-                toolDetailFooter.style.display = 'none';
-              });
-
-              // 确认执行
-              document.getElementById('btnConfirmReplace').addEventListener('click', async (eConfirm) => {
-                const confirmBtn = eConfirm.target;
-                const editBtn = document.getElementById('btnEditRule');
-                if (!(await confirmDangerAction(
-                  t('popup.tools.batchReplaceConfirmPrompt', { count: matches.length }, `Replace these ${matches.length} URLs?`),
-                  { okText: t('popup.tools.batchReplaceConfirmOk', null, 'Replace') }
-                ))) return;
-
-                confirmBtn.disabled = true;
-                editBtn.disabled = true;
-                confirmBtn.innerHTML = t('popup.tools.batchReplaceRunning', null, '<div class="url-inline-spinner">Replacing...</div>');
-
-                statusArea.style.display = 'flex';
-                statusArea.style.color = 'var(--text-secondary)';
-                statusText.innerHTML = t('popup.tools.batchReplaceExecuting', null, 'Applying replacements...');
-
-                let promises = matches.map(m => {
-                  return new Promise(res => chrome.bookmarks.update(m.node.id, { url: m.newUrl }, res));
-                });
-
-                Promise.all(promises).then(() => {
-                  statusArea.style.color = '#34c759';
-                  statusText.innerHTML = t('popup.tools.batchReplaceDone', { count: matches.length }, `🎉 Replaced ${matches.length} URLs successfully`);
-
-                  document.getElementById('statusReplaceUrl').textContent = t('popup.tools.batchReplaceLastStatus', { count: matches.length }, `Last replace: ${matches.length} items`);
-
-                  // 替换完成后保留状态，按钮变为"完成"返回
-                  confirmBtn.style.display = 'none';
-                  editBtn.style.display = 'none';
-
-                  const doneBtn = document.createElement('button');
-                  doneBtn.className = 'tool-btn tool-btn-primary';
-                  doneBtn.classList.add('tool-flex-1');
-                  doneBtn.textContent = t('popup.tools.batchReplaceDoneButton', null, 'Done');
-                  doneBtn.onclick = () => {
-                    closeToolView();
-                    refreshView();
-                  };
-                  toolDetailFooter.appendChild(doneBtn);
-
-                  refreshView();
-                });
-              });
-            });
-          }, 300); // 300ms 模拟扫描时间，提升体验感
-        });
-      });
-    }
   }
 
   // --- IMPORT HANDLE ---

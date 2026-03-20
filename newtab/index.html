@@ -32,6 +32,8 @@
     <div id="story-body" class="story-body"></div>
   </div>
 
+  <div id="status-toast" class="status-toast" aria-live="polite"></div>
+
   <!-- 收藏按钮 -->
   <button id="fav-btn" class="floating-btn" data-i18n-title="newtab.favoriteWallpaper" title="收藏这张壁纸">
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"
@@ -57,30 +59,62 @@
     <!-- 悬浮弹出的图库菜单 -->
     <div class="source-menu" id="source-menu">
       <div class="radio-group" id="provider-selector">
-        <label>
+        <label class="provider-option">
           <input type="radio" name="provider" value="bing">
-          <span style="flex: 1;" data-i18n="newtab.providers.bing">必应主页</span>
-          <button id="bing-today-btn" type="button" class="action-btn" data-i18n="newtab.today" data-i18n-title="newtab.today" title="Today">今天</button>
+          <span class="provider-option-text" data-i18n="newtab.providers.bing">必应主页</span>
+          <span class="provider-option-action">
+            <button id="bing-today-btn" type="button" class="action-btn" data-i18n="newtab.today" data-i18n-title="newtab.today" title="Today">今天</button>
+          </span>
         </label>
-        <label>
+        <label class="provider-option">
           <input type="radio" name="provider" value="nasa">
-          <span style="flex: 1;" data-i18n="newtab.providers.nasa">NASA天文</span>
-          <button id="nasa-today-btn" type="button" class="action-btn" data-i18n="newtab.today" data-i18n-title="newtab.today" title="Today">今天</button>
+          <span class="provider-option-text" data-i18n="newtab.providers.nasa">NASA天文</span>
+          <span class="provider-option-action">
+            <button id="nasa-today-btn" type="button" class="action-btn" data-i18n="newtab.today" data-i18n-title="newtab.today" title="Today">今天</button>
+          </span>
         </label>
-        <label>
+        <label class="provider-option">
           <input type="radio" name="provider" value="picsum">
-          <span data-i18n="newtab.providers.picsum">无尽随机</span>
+          <span class="provider-option-text" data-i18n="newtab.providers.picsum">无尽随机</span>
+          <span class="provider-option-action" aria-hidden="true"></span>
         </label>
-        <label>
+        <label class="provider-option">
           <input type="radio" name="provider" value="favorites">
-          <span style="flex: 1;" data-i18n="newtab.providers.favorites">我的收藏</span>
-          <button id="clear-favorites-btn" type="button" class="action-btn" data-i18n="newtab.clearFavorites" data-i18n-title="newtab.clearFavorites" title="Clear">清空</button>
+          <span class="provider-option-text" data-i18n="newtab.providers.favorites">我的收藏</span>
+          <span class="provider-option-action">
+            <button id="clear-favorites-btn" type="button" class="action-btn" data-i18n="newtab.clearFavorites" data-i18n-title="newtab.clearFavorites" title="Clear">清空</button>
+          </span>
         </label>
+      </div>
+      <div id="nasa-api-panel" class="source-menu-note" hidden>
+        <div class="source-menu-note-title" data-i18n="newtab.nasaApi.title">NASA API Key</div>
+        <div id="nasa-api-status" class="source-menu-note-text"></div>
+        <div class="source-menu-note-help" data-i18n-html="newtab.nasaApi.hintHtml">默认使用 <code>DEMO_KEY</code>，有速率限制。你也可以填写自己申请的 NASA API Key，配置仅保存在本地浏览器中。</div>
+        <div class="source-menu-note-actions">
+          <button id="nasa-api-config-btn" type="button" class="action-btn action-btn-visible" data-i18n="newtab.nasaApi.configure" data-i18n-title="newtab.nasaApi.configure" title="Set Key">设置</button>
+          <button id="nasa-api-reset-btn" type="button" class="action-btn action-btn-visible" data-i18n="newtab.nasaApi.reset" data-i18n-title="newtab.nasaApi.reset" title="Use Default">默认</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div id="nasa-api-modal" class="mini-modal">
+    <div class="mini-modal-card">
+      <div class="mini-modal-header">
+        <div id="nasa-api-modal-title" class="mini-modal-title" data-i18n="newtab.nasaApi.modalTitle">配置 NASA API Key</div>
+        <button id="nasa-api-close" type="button" class="mini-modal-close" data-i18n-title="common.close" title="关闭">&times;</button>
+      </div>
+      <div class="mini-modal-hint" data-i18n-html="newtab.nasaApi.modalHintHtml">留空即恢复默认 <code>DEMO_KEY</code>。如果你有自己的 NASA API Key，可以填入后保存；该配置只保存在当前浏览器本地。</div>
+      <input id="nasa-api-input" class="mini-modal-input" type="text" spellcheck="false" autocomplete="off" data-i18n-placeholder="newtab.nasaApi.placeholder" placeholder="输入你的 NASA API Key">
+      <div class="mini-modal-actions">
+        <button id="nasa-api-cancel" type="button" class="action-btn action-btn-visible" data-i18n="common.cancel">取消</button>
+        <button id="nasa-api-save" type="button" class="action-btn action-btn-visible" data-i18n="common.save">保存</button>
       </div>
     </div>
   </div>
 
   <script src="../shared/i18n.js"></script>
+  <script src="modules/providers.js"></script>
   <script src="script.js"></script>
 </body>
 

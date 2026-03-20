@@ -27,8 +27,10 @@ jobs:
           # 排除 .git, .github, .gitignore 等开发环境文件
           zip -r "$ZIP_NAME" \
             manifest.json \
+            _locales/ \
             bookmarks/ \
             newtab/ \
+            shared/ \
             privacy.html \
             README.md
           

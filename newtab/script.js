@@ -26,24 +26,35 @@
     bgImage: document.getElementById('bg-image'),
     bgOverlay: document.getElementById('bg-overlay'),
     copyright: document.getElementById('bg-copyright'),
-        // ----- 设置与收藏面板元素 -----
+    // ----- 设置与收藏面板元素 -----
     providerSelector: document.getElementById('provider-selector'),
     favBtn: document.getElementById('fav-btn'),
     refreshBtn: document.getElementById('refresh-btn'),
     refreshWrapper: document.getElementById('refresh-wrapper'),
     sourceMenu: document.getElementById('source-menu'),
+    nasaApiPanel: document.getElementById('nasa-api-panel'),
     clearFavoritesBtn: document.getElementById('clear-favorites-btn'),
+    nasaApiStatus: document.getElementById('nasa-api-status'),
+    nasaApiConfigBtn: document.getElementById('nasa-api-config-btn'),
+    nasaApiResetBtn: document.getElementById('nasa-api-reset-btn'),
+    nasaApiModal: document.getElementById('nasa-api-modal'),
+    nasaApiInput: document.getElementById('nasa-api-input'),
+    nasaApiCloseBtn: document.getElementById('nasa-api-close'),
+    nasaApiCancelBtn: document.getElementById('nasa-api-cancel'),
+    nasaApiSaveBtn: document.getElementById('nasa-api-save'),
     storyCard: document.getElementById('story-card'),
     storyTitle: document.getElementById('story-title'),
     storyBody: document.getElementById('story-body'),
-    storyClose: document.getElementById('story-close')
+    storyClose: document.getElementById('story-close'),
+    statusToast: document.getElementById('status-toast')
   };
 
   const CONSTANTS = {
     BING_API_ZH: 'https://bing.ee123.net/img/',
     BING_API_EN: 'https://global.bing.com/HPImageArchive.aspx',
     BING_API_ROOT_EN: 'https://www.bing.com',
-    NASA_API: 'https://api.nasa.gov/planetary/apod?api_key=0MsI7Uti0ePSZuLvN2ZOJq4C2f4PaQjbBKPq1yQs',
+    NASA_API_ROOT: 'https://api.nasa.gov/planetary/apod',
+    DEFAULT_NASA_API_KEY: 'DEMO_KEY',
     CACHE_KEYS: {
       SETTINGS: 'newtab_settings',
       FAVORITES: 'newtab_favorites',
@@ -52,6 +63,9 @@
       NASA: 'newtab_cache_nasa',
       PICSUM: 'newtab_cache_picsum',
       CURRENT_WALLPAPER: 'newtab_current_wallpaper'
+    },
+    PREFERENCE_KEYS: {
+      NASA_API_KEY: 'newtab_nasa_api_key'
     },
     TTL: {
       BING: 6 * 60 * 60 * 1000, // 6小时
@@ -89,13 +103,22 @@
     return `${config.mode}:${config.market}`;
   }
 
-  function containsCjk(text) {
-    return /[\u3400-\u9FFF]/.test(String(text || ''));
+  function normalizeNasaApiKey(value) {
+    const normalized = String(value || '').trim();
+    return normalized || CONSTANTS.DEFAULT_NASA_API_KEY;
+  }
+
+  function maskApiKey(value) {
+    const key = String(value || '').trim();
+    if (!key) return CONSTANTS.DEFAULT_NASA_API_KEY;
+    if (key.length <= 8) return key;
+    return `${key.slice(0, 4)}...${key.slice(-4)}`;
   }
 
   // 当前壁纸的元数据（用于收藏）
   let currentWallpaperData = null;
   let wallpaperRenderToken = 0;
+  let statusToastTimer = 0;
 
   // =============================
   //  2. 基础存储与缓存工具
@@ -126,8 +149,87 @@
     }
   };
 
+  const NasaApiKeyManager = {
+    apiKey: CONSTANTS.DEFAULT_NASA_API_KEY,
+    async load() {
+      const storedKey = await Storage.get(CONSTANTS.PREFERENCE_KEYS.NASA_API_KEY, '');
+      this.apiKey = normalizeNasaApiKey(storedKey);
+    },
+    getKey() {
+      return normalizeNasaApiKey(this.apiKey);
+    },
+    isUsingDefault() {
+      return this.getKey() === CONSTANTS.DEFAULT_NASA_API_KEY;
+    },
+    async save(value) {
+      const normalized = normalizeNasaApiKey(value);
+      this.apiKey = normalized;
+      await Storage.set(
+        CONSTANTS.PREFERENCE_KEYS.NASA_API_KEY,
+        normalized === CONSTANTS.DEFAULT_NASA_API_KEY ? '' : normalized
+      );
+    },
+    async reset() {
+      await this.save('');
+    }
+  };
+
   function sleep(ms) {
     return new Promise(resolve => setTimeout(resolve, ms));
+  }
+
+  function updateNasaApiKeyStatus() {
+    if (DOM.nasaApiStatus) {
+      DOM.nasaApiStatus.textContent = NasaApiKeyManager.isUsingDefault()
+        ? t('newtab.nasaApi.usingDefault', { key: CONSTANTS.DEFAULT_NASA_API_KEY }, `当前使用默认 Key：${CONSTANTS.DEFAULT_NASA_API_KEY}`)
+        : t('newtab.nasaApi.usingCustom', { key: maskApiKey(NasaApiKeyManager.getKey()) }, `当前使用自定义 Key：${maskApiKey(NasaApiKeyManager.getKey())}`);
+    }
+
+    if (DOM.nasaApiInput) {
+      DOM.nasaApiInput.value = NasaApiKeyManager.isUsingDefault() ? '' : NasaApiKeyManager.getKey();
+    }
+  }
+
+  function updateNasaApiVisibility() {
+    const isVisible = SettingsManager.settings.provider === 'nasa';
+    if (DOM.nasaApiPanel) {
+      DOM.nasaApiPanel.hidden = !isVisible;
+    }
+    if (!isVisible) {
+      closeNasaApiModal();
+    }
+  }
+
+  function openNasaApiModal() {
+    if (!DOM.nasaApiModal || !DOM.nasaApiPanel || DOM.nasaApiPanel.hidden) return;
+    updateNasaApiKeyStatus();
+    DOM.nasaApiModal.classList.add('open');
+    if (DOM.nasaApiInput) {
+      setTimeout(() => {
+        DOM.nasaApiInput.focus();
+        DOM.nasaApiInput.select();
+      }, 0);
+    }
+  }
+
+  function closeNasaApiModal() {
+    if (!DOM.nasaApiModal) return;
+    DOM.nasaApiModal.classList.remove('open');
+  }
+
+  async function refreshCurrentNasaWallpaper() {
+    WallpaperProviders.resetNasaDateOffset();
+    await Cache.set(CONSTANTS.CACHE_KEYS.CURRENT_WALLPAPER, null);
+    if (SettingsManager.settings.provider === 'nasa') {
+      await renderBackground(false);
+    }
+  }
+
+  async function saveNasaApiKey(value) {
+    await NasaApiKeyManager.save(value);
+    updateNasaApiKeyStatus();
+    closeNasaApiModal();
+    await refreshCurrentNasaWallpaper();
   }
 
   function isRetryableStatus(status) {
@@ -297,257 +399,27 @@
   // =============================
   //  4. 壁纸提供者 (Providers)
   // =============================
-  const WallpaperProviders = {
-        // Bing 日期偏移量（每次点击刷新 +1，往前回退一天）
-    _bingDateOffset: 0,
+  const providerFactory = window.JadeNewtabProviders?.createWallpaperProviders;
+  if (typeof providerFactory !== 'function') {
+    throw new Error('New Tab providers module failed to load');
+  }
 
-    // ---- 1. Bing 每日超清壁纸 (按日期倒序浏览) ----
-    async bing(forceRefresh = false) {
-      // forceRefresh 时偏移量 +1（回到前一天），否则保持当前偏移量
-      if (forceRefresh) {
-        this._bingDateOffset++;
-      }
-
-      // 根据偏移量计算目标日期
-      const targetDate = new Date();
-      targetDate.setDate(targetDate.getDate() - this._bingDateOffset);
-      const dateStr = targetDate.getFullYear().toString() +
-        String(targetDate.getMonth() + 1).padStart(2, '0') +
-        String(targetDate.getDate()).padStart(2, '0');
-      const bingConfig = getBingLocaleConfig();
-
-      if (bingConfig.mode === 'ee123') {
-        const fetchUrl = `${CONSTANTS.BING_API_ZH}?date=${dateStr}&size=UHD&type=json`;
-
-        const response = await fetchWithRetry(fetchUrl);
-        if (!response.ok) throw new Error(`HTTP ${response.status}`);
-        const data = await response.json();
-        const imageUrl = data.imgurl || data.imgurl_d || data.url;
-        if (!imageUrl) throw new Error('No image data');
-
-        return this._localizeBingContent({
-          url: imageUrl,
-          copyright: data.imgcopyright || data.imgtitle || 'Bing Wallpaper',
-          title: data.imgtitle || '',
-          show: data.imgshow || '',
-          detail: data.imgdetail || '',
-          provider: 'bing',
-          _dateStr: dateStr,
-          _bingVariant: getBingVariantKey()
-        });
-      }
-
-      const officialOffset = Math.min(this._bingDateOffset, 7);
-      this._bingDateOffset = officialOffset;
-      const fetchUrl = `${CONSTANTS.BING_API_EN}?format=js&idx=${officialOffset}&n=1&pid=hp&FORM=BEHPTB&uhd=1&uhdwidth=3840&uhdheight=2160&setmkt=${encodeURIComponent(bingConfig.market.toLowerCase())}&setlang=en-us`;
-      const response = await fetchWithRetry(fetchUrl);
-      if (!response.ok) throw new Error(`HTTP ${response.status}`);
-      const data = await response.json();
-      const image = Array.isArray(data.images) ? data.images[0] : null;
-      if (!image) throw new Error('No image data');
-
-      const imageUrl = image.url
-        ? `${CONSTANTS.BING_API_ROOT_EN}${image.url}`
-        : (image.urlbase ? `${CONSTANTS.BING_API_ROOT_EN}${image.urlbase}_UHD.jpg` : '');
-      if (!imageUrl) throw new Error('No image url');
-
-      const title = image.title || '';
-      const copyright = image.copyright || title || 'Bing Wallpaper';
-
-      return this._localizeBingContent({
-        url: imageUrl,
-        copyright,
-        title,
-        show: '',
-        detail: image.copyright && image.copyright !== image.title ? image.copyright : '',
-        provider: 'bing',
-        _dateStr: image.startdate || dateStr,
-        _bingVariant: getBingVariantKey()
-      });
-    },
-
-    async _localizeBingContent(payload) {
-      if (!payload || isZhLocale) return payload;
-
-      const needsTranslation = [payload.title, payload.show, payload.detail, payload.copyright].some(containsCjk);
-      if (!needsTranslation) return payload;
-
-      const [title, show, detail, copyright] = await Promise.all([
-        this._translate(payload.title, { sourceLang: 'auto', targetLang: 'en' }),
-        this._translate(payload.show, { sourceLang: 'auto', targetLang: 'en' }),
-        this._translate(payload.detail, { sourceLang: 'auto', targetLang: 'en' }),
-        this._translate(payload.copyright, { sourceLang: 'auto', targetLang: 'en' })
-      ]);
-
-      return {
-        ...payload,
-        title: title || payload.title,
-        show: show || payload.show,
-        detail: detail || payload.detail,
-        copyright: copyright || payload.copyright
-      };
-    },
-
-        // --- 简单的免费翻译接口辅助函数 (Google App Script 或直接调用公开接口) ---
-    async _translate(text, options = {}) {
-      if (!text) return '';
-      const sourceLang = options.sourceLang || 'en';
-      const targetLang = options.targetLang || 'zh-CN';
-
-      try {
-        // MyMemory API 限制单次 500 字符。如果超长，则按句号切分再合并
-        let chunks = [];
-        if (text.length > 450) {
-          const sentences = text.match(/[^.!?]+[.!?]+/g) || [text];
-          let currentChunk = '';
-          sentences.forEach(s => {
-            if (currentChunk.length + s.length < 450) {
-              currentChunk += s;
-            } else {
-              chunks.push(currentChunk);
-              currentChunk = s;
-            }
-          });
-          if (currentChunk) chunks.push(currentChunk);
-        } else {
-          chunks = [text];
-        }
-
-        let translatedArr = [];
-        for (let chunk of chunks) {
-          const res = await fetch(`https://api.mymemory.translated.net/get?q=${encodeURIComponent(chunk)}&langpair=${encodeURIComponent(sourceLang)}|${encodeURIComponent(targetLang)}`);
-          if (res.ok) {
-            const json = await res.json();
-            if (json && json.responseData && json.responseData.translatedText && !json.responseData.translatedText.includes('QUERY LENGTH LIMIT')) {
-              translatedArr.push(json.responseData.translatedText);
-            }
-          }
-        }
-
-        if (translatedArr.length > 0) {
-          return translatedArr.join(' ');
-        }
-      } catch (e) {
-        console.warn('[NewTab] MyMemory translation failed, trying Google:', e);
-      }
-
-      try {
-        // 后备：Google 免费接口
-        const t = text.substring(0, 500); // 防超长
-        const url = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=${encodeURIComponent(sourceLang)}&tl=${encodeURIComponent(targetLang)}&dt=t&q=${encodeURIComponent(t)}`;
-        const res = await fetch(url);
-        if (res.ok) {
-          const json = await res.json();
-          let translatedText = '';
-          if (json && json[0]) {
-            json[0].forEach(item => {
-              if (item[0]) translatedText += item[0];
-            });
-          }
-          return translatedText;
-        }
-      } catch (e) {
-        console.warn('[NewTab] Google translation failed', e);
-      }
-      return '';
-    },
-
-        // NASA 日期偏移量（与 Bing 同理）
-    _nasaDateOffset: 0,
-
-    // ---- 2. NASA 每日天文图 (按日期倒序浏览) ----
-    async nasa(forceRefresh = false) {
-      if (forceRefresh) {
-        this._nasaDateOffset++;
-      }
-
-      // 最多连续跳过 10 天的视频类型
-      const maxSkip = 10;
-      for (let skip = 0; skip < maxSkip; skip++) {
-        const targetDate = new Date();
-        targetDate.setDate(targetDate.getDate() - this._nasaDateOffset - skip);
-        const y = targetDate.getFullYear();
-        const m = String(targetDate.getMonth() + 1).padStart(2, '0');
-        const d = String(targetDate.getDate()).padStart(2, '0');
-
-        const fetchUrl = `${CONSTANTS.NASA_API}&date=${y}-${m}-${d}`;
-        const response = await fetchWithRetry(fetchUrl, {
-          retryOnStatus: (status) => status === 429 || isRetryableStatus(status)
-        });
-        if (!response.ok) {
-          if (response.status === 429) throw new Error('NASA Rate Limit Exceeded');
-          // 404 等错误（当天图片尚未发布），跳到前一天
-          this._nasaDateOffset++;
-          continue;
-        }
-
-        const data = await response.json();
-        if (data.media_type !== 'image') {
-          // 遇到视频，额外把偏移量也推进，跳过这天
-          this._nasaDateOffset++;
-          continue;
-        }
-
-        // 尝试获取翻译
-        let finalTitle = data.title || '';
-        let finalDetail = data.explanation || '';
-
-        if (isZhLocale) {
-          const [zhTitle, zhDetail] = await Promise.all([
-            this._translate(data.title),
-            this._translate(data.explanation)
-          ]);
-          finalTitle = zhTitle ? `${zhTitle} | ${data.title}` : data.title || '';
-          finalDetail = zhDetail ? `${zhDetail}<br><br><span style="color:var(--text-secondary);font-size:0.95em;opacity:0.8;">${data.explanation}</span>` : data.explanation || '';
-        }
-
-        return {
-          url: data.hdurl || data.url,
-          copyright: `NASA APOD: ${finalTitle}` + (data.copyright ? ` (© ${data.copyright.trim()})` : ''),
-          title: finalTitle,
-          detail: finalDetail,
-          provider: 'nasa',
-          _dateStr: `${y}${m}${d}`
-        };
-      }
-      throw new Error('NASA returned video-only results for multiple days');
-    },
-
-    // ---- 3. Picsum 随机壁纸 ----
-    async picsum(forceRefresh = false) {
-
-      // 获取屏幕分辨率
-      const w = window.screen.width * window.devicePixelRatio;
-      const h = window.screen.height * window.devicePixelRatio;
-            // 避免缓存，加个随机种子
-      const seed = Math.floor(Math.random() * 100000);
-      const result = {
-        url: `https://picsum.photos/seed/${seed}/${Math.round(w)}/${Math.round(h)}`,
-        copyright: 'Random image from Lorem Picsum',
-        provider: 'picsum'
-      };
-      return result;
-    },
-
-    // ---- 4. 收藏轮播 ----
-    async favorites(forceRefresh = false) {
-      if (FavoritesManager.favorites.length === 0) {
-        // 如果没有收藏，直接回退并展示 Bing 每日壁纸
-        return this.bing(forceRefresh);
-      }
-
-      // 为了防止每次连续刷到一样的（特别是收藏夹较少时）
-      // 我们限制如果收藏大于1张，那么一定不要抽到当前 history 里的最后一张
-      const maxRetries = 10;
-      for (let i = 0; i < maxRetries; i++) {
-        const fav = FavoritesManager.getRandomFavorite();
-        // 如果只收藏了一张图，或者没看过，或者重试实在太多次了，就妥协
-        if (FavoritesManager.favorites.length <= 1 || !HistoryManager.isRecent(fav.url) || i === maxRetries - 1) {
-          return fav;
-        }
-      }
-    }
-  };
+  const WallpaperProviders = providerFactory({
+    constants: CONSTANTS,
+    isZhLocale,
+    containsCjk: text => /[\u3400-\u9FFF]/.test(String(text || '')),
+    getBingLocaleConfig,
+    getBingVariantKey,
+    fetchWithRetry,
+    isRetryableStatus,
+    nasaApiKeyManager: NasaApiKeyManager,
+    favoritesManager: FavoritesManager,
+    historyManager: HistoryManager,
+    fetchImpl: window.fetch.bind(window),
+    consoleObject: console,
+    screenObject: window.screen,
+    devicePixelRatio: window.devicePixelRatio
+  });
 
   // =============================
   async function applyWallpaper(data, renderToken) {
@@ -611,6 +483,24 @@
     }
   }
 
+  function hideStatusToast() {
+    if (!DOM.statusToast) return;
+    DOM.statusToast.classList.remove('open', 'warning', 'info');
+    DOM.statusToast.textContent = '';
+  }
+
+  function showStatusToast(message, tone = 'info') {
+    if (!DOM.statusToast || !message) return;
+
+    window.clearTimeout(statusToastTimer);
+    DOM.statusToast.textContent = message;
+    DOM.statusToast.classList.remove('warning', 'info');
+    DOM.statusToast.classList.add(tone, 'open');
+    statusToastTimer = window.setTimeout(() => {
+      hideStatusToast();
+    }, 4200);
+  }
+
   function sanitizeStoryDetail(html) {
     if (!html) return '';
 
@@ -648,6 +538,7 @@
   async function renderBackground(forceRefresh = false) {
     const renderToken = ++wallpaperRenderToken;
     const providerKey = SettingsManager.settings.provider;
+    const shouldNotifyFavoritesFallback = providerKey === 'favorites' && FavoritesManager.favorites.length === 0;
 
     // 定义不同壁纸源的轮播/保持间隔毫秒数
     // Bing/NASA 是每日图，保持久一些（例如 6 小时）
@@ -670,8 +561,7 @@
         // 对收藏检查是否被移除了
         if (cacheMatchesBingVariant && (providerKey !== 'favorites' || FavoritesManager.isFavorited(cached.url))) {
           // 恢复缓存对应的偏移量，防止新开标签页后点击刷新跳回最新天数
-          if (cached._bingDateOffset !== undefined) WallpaperProviders._bingDateOffset = cached._bingDateOffset;
-          if (cached._nasaDateOffset !== undefined) WallpaperProviders._nasaDateOffset = cached._nasaDateOffset;
+          WallpaperProviders.restoreState(cached);
 
           try {
             const applied = await applyWallpaper(cached, renderToken);
@@ -683,26 +573,52 @@
       }
     }
 
-    let providerFn = WallpaperProviders[providerKey];
-    if (!providerFn) providerFn = WallpaperProviders.bing;
+    const providerFn = WallpaperProviders.get(providerKey);
 
     try {
-      const data = await providerFn.call(WallpaperProviders, forceRefresh);
+      const data = await providerFn(forceRefresh);
       const applied = await applyWallpaper(data, renderToken);
       if (!applied || renderToken !== wallpaperRenderToken) return;
+      if (shouldNotifyFavoritesFallback && data.provider === 'bing') {
+        showStatusToast(
+          t(
+            'newtab.notices.favoritesEmptyFallback',
+            null,
+            '当前还没有收藏壁纸，已自动回退到必应主页。'
+          ),
+          'info'
+        );
+      }
       // 新数据成功后，统一在此处写入持久化，并放入不重复历史名单。同时保存当下的日期偏移量。
       const cacheData = {
         ...data,
-        _bingDateOffset: WallpaperProviders._bingDateOffset,
-        _nasaDateOffset: WallpaperProviders._nasaDateOffset
+        ...WallpaperProviders.getState()
       };
       await Cache.set(CONSTANTS.CACHE_KEYS.CURRENT_WALLPAPER, cacheData);
       await HistoryManager.add(data.url);
     } catch (err) {
       console.warn(`[NewTab] Provider '${providerKey}' 失败:`, err.message);
+      if (providerKey === 'nasa' && err.message === 'NASA Rate Limit Exceeded') {
+        const messageKey = NasaApiKeyManager.isUsingDefault()
+          ? 'newtab.notices.nasaRateLimitDefaultFallback'
+          : 'newtab.notices.nasaRateLimitCustomFallback';
+        const fallbackMessage = NasaApiKeyManager.isUsingDefault()
+          ? 'NASA 默认 DEMO_KEY 已触发限流，已临时回退到必应。你可以稍后再试，或填写自己的 NASA API Key。'
+          : '当前 NASA API Key 已触发限流，已临时回退到必应。你可以稍后再试或更换 Key。';
+        showStatusToast(t(messageKey, null, fallbackMessage), 'warning');
+      } else if (providerKey !== 'bing') {
+        showStatusToast(
+          t(
+            'newtab.notices.providerFallbackGeneric',
+            { provider: providerKey },
+            '当前壁纸源暂时不可用，已自动回退到必应主页。'
+          ),
+          'warning'
+        );
+      }
       // 其他任何获取异常（如无网络、接口报错等）全部回退到必应（必应非常稳定）
       try {
-        const data = await WallpaperProviders.bing();
+        const data = await WallpaperProviders.get('bing')();
         const applied = await applyWallpaper(data, renderToken);
         if (!applied || renderToken !== wallpaperRenderToken) return;
       } catch (e) {
@@ -721,8 +637,11 @@
     await Promise.all([
       SettingsManager.load(),
       FavoritesManager.load(),
-      HistoryManager.load()
+      HistoryManager.load(),
+      NasaApiKeyManager.load()
     ]);
+    updateNasaApiKeyStatus();
+    updateNasaApiVisibility();
     // 开始渲染背景
     renderBackground();
 
@@ -735,9 +654,9 @@
       radio.addEventListener('change', async (e) => {
         SettingsManager.settings.provider = e.target.value;
         await SettingsManager.save();
+        updateNasaApiVisibility();
         // 切换来源时重置日期偏移量，确保显示最新壁纸
-        WallpaperProviders._bingDateOffset = 0;
-        WallpaperProviders._nasaDateOffset = 0;
+        WallpaperProviders.resetAllOffsets();
         await Cache.set(CONSTANTS.CACHE_KEYS.CURRENT_WALLPAPER, null);
         renderBackground(false);
       });
@@ -801,7 +720,7 @@
       bingTodayBtn.addEventListener('click', async (e) => {
         e.preventDefault();
         e.stopPropagation();
-        WallpaperProviders._bingDateOffset = 0;
+        WallpaperProviders.resetBingDateOffset();
         await Cache.set(CONSTANTS.CACHE_KEYS.CURRENT_WALLPAPER, null); // 清除缓存
         if (SettingsManager.settings.provider === 'bing') {
           await renderBackground(false);
@@ -813,10 +732,67 @@
       nasaTodayBtn.addEventListener('click', async (e) => {
         e.preventDefault();
         e.stopPropagation();
-        WallpaperProviders._nasaDateOffset = 0;
+        WallpaperProviders.resetNasaDateOffset();
         await Cache.set(CONSTANTS.CACHE_KEYS.CURRENT_WALLPAPER, null);
         if (SettingsManager.settings.provider === 'nasa') {
           await renderBackground(false);
+        }
+      });
+    }
+
+    if (DOM.nasaApiConfigBtn) {
+      DOM.nasaApiConfigBtn.addEventListener('click', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        openNasaApiModal();
+      });
+    }
+
+    if (DOM.nasaApiResetBtn) {
+      DOM.nasaApiResetBtn.addEventListener('click', async (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        if (confirm(t('newtab.nasaApi.resetConfirm', null, '确定恢复为默认 DEMO_KEY 吗？'))) {
+          await NasaApiKeyManager.reset();
+          updateNasaApiKeyStatus();
+          await refreshCurrentNasaWallpaper();
+        }
+      });
+    }
+
+    if (DOM.nasaApiCloseBtn) {
+      DOM.nasaApiCloseBtn.addEventListener('click', closeNasaApiModal);
+    }
+
+    if (DOM.nasaApiCancelBtn) {
+      DOM.nasaApiCancelBtn.addEventListener('click', closeNasaApiModal);
+    }
+
+    if (DOM.nasaApiSaveBtn) {
+      DOM.nasaApiSaveBtn.addEventListener('click', async () => {
+        await saveNasaApiKey(DOM.nasaApiInput ? DOM.nasaApiInput.value : '');
+      });
+    }
+
+    if (DOM.nasaApiInput) {
+      DOM.nasaApiInput.addEventListener('keydown', async (e) => {
+        if (e.key === 'Enter') {
+          e.preventDefault();
+          await saveNasaApiKey(DOM.nasaApiInput.value);
+          return;
+        }
+
+        if (e.key === 'Escape') {
+          e.preventDefault();
+          closeNasaApiModal();
+        }
+      });
+    }
+
+    if (DOM.nasaApiModal) {
+      DOM.nasaApiModal.addEventListener('click', (e) => {
+        if (e.target === DOM.nasaApiModal) {
+          closeNasaApiModal();
         }
       });
     }

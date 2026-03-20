@@ -1,6 +1,8 @@
 .gemini/
 .git/
+.vs/
 node_modules/
 dist/
+*.zip
 *.log
 .DS_Store

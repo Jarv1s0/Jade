@@ -37,6 +37,22 @@
 3. 开启右上角的 **开发者模式**。
 4. 点击 **加载已解压的扩展程序**，选择本项目根目录。
 
+## 📦 本地打包
+
+在项目根目录执行：
+
+```powershell
+.\release\build.ps1
+```
+
+脚本会自动读取 `manifest.json` 里的版本号，并在 `release/` 目录下生成类似 `Jade-v1.1.zip` 的安装包。
+
+如果你想自定义输出文件名：
+
+```powershell
+.\release\build.ps1 -OutputName Jade.zip
+```
+
 ---
 
 ## 🎨 技术栈

@@ -257,6 +257,24 @@
           picsum: '无尽随机',
           favorites: '我的收藏'
         },
+        nasaApi: {
+          title: 'NASA API Key',
+          configure: '设置',
+          reset: '默认',
+          modalTitle: '配置 NASA API Key',
+          placeholder: '输入你自己的 NASA API Key',
+          hintHtml: '默认使用 <code>DEMO_KEY</code>，有速率限制。你也可以填写自己申请的 NASA API Key，配置仅保存在本地浏览器中。',
+          modalHintHtml: '留空即恢复默认 <code>DEMO_KEY</code>。如果你有自己的 NASA API Key，可以填入后保存；该配置只保存在当前浏览器本地。',
+          usingDefault: '当前使用默认 Key：{{key}}',
+          usingCustom: '当前使用自定义 Key：{{key}}',
+          resetConfirm: '确定恢复为默认 DEMO_KEY 吗？'
+        },
+        notices: {
+          favoritesEmptyFallback: '当前还没有收藏壁纸，已自动回退到必应主页。',
+          nasaRateLimitDefaultFallback: 'NASA 默认 DEMO_KEY 已触发限流，已临时回退到必应。你可以稍后再试，或填写自己的 NASA API Key。',
+          nasaRateLimitCustomFallback: '当前 NASA API Key 已触发限流，已临时回退到必应。你可以稍后再试或更换 Key。',
+          providerFallbackGeneric: '当前壁纸源暂时不可用，已自动回退到必应主页。'
+        },
         today: '今天',
         clearFavorites: '清空',
         clearFavoritesConfirm: '确定要清空所有收藏的壁纸吗？此操作不可撤销。'
@@ -516,6 +534,24 @@
           nasa: 'NASA APOD',
           picsum: 'Endless Random',
           favorites: 'Favorites'
+        },
+        nasaApi: {
+          title: 'NASA API Key',
+          configure: 'Set Key',
+          reset: 'Default',
+          modalTitle: 'Configure NASA API Key',
+          placeholder: 'Enter your NASA API Key',
+          hintHtml: 'Uses the default <code>DEMO_KEY</code> by default, which has rate limits. You can also enter your own NASA API Key; it is stored only in this browser.',
+          modalHintHtml: 'Leave blank to restore the default <code>DEMO_KEY</code>. If you have your own NASA API Key, enter it and save; it will stay local to this browser.',
+          usingDefault: 'Using default key: {{key}}',
+          usingCustom: 'Using custom key: {{key}}',
+          resetConfirm: 'Restore the default DEMO_KEY?'
+        },
+        notices: {
+          favoritesEmptyFallback: 'No favorite wallpapers yet. Automatically fell back to Bing Home.',
+          nasaRateLimitDefaultFallback: 'The default NASA DEMO_KEY hit its rate limit, so the page temporarily fell back to Bing. Try again later or add your own NASA API Key.',
+          nasaRateLimitCustomFallback: 'The current NASA API Key hit its rate limit, so the page temporarily fell back to Bing. Try again later or switch to another key.',
+          providerFallbackGeneric: 'The current wallpaper source is temporarily unavailable, so the page fell back to Bing Home.'
         },
         today: 'Today',
         clearFavorites: 'Clear',
