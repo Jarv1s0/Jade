@@ -565,9 +565,6 @@ document.addEventListener('DOMContentLoaded', function () {
       : t('popup.shortcutWin', null, 'Ctrl K');
   }
 
-  // --- 初始化 ---
-  init();
-
   function init() {
     setupBookmarkCacheInvalidation();
 
@@ -2715,5 +2712,8 @@ document.addEventListener('DOMContentLoaded', function () {
       });
     });
   }
+
+  // --- 初始化 ---
+  init();
 });
 
