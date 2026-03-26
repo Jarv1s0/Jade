@@ -1,5 +1,14 @@
 # Changelog
 
+## 2026-03-26
+
+### Changed
+- Bumped the extension version to `1.2`.
+
+### Fixed
+- Fixed the bookmarks popup sometimes staying open after clicking a bookmark link.
+- Fixed inconsistent popup close behavior when reusing the current new tab for bookmark navigation.
+
 ## 2026-03-20
 
 ### Added

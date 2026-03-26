@@ -413,6 +413,16 @@ document.addEventListener('DOMContentLoaded', function () {
     });
   }
 
+  function closePopupWindowIfNeeded({ active = true } = {}) {
+    if (isSidePanel || !active) return;
+
+    try {
+      window.close();
+    } catch (error) {
+      console.warn('[Jade] Failed to close popup window after opening bookmark.', error);
+    }
+  }
+
   async function openBookmarkUrl(url, { active = true } = {}) {
     if (!url) return;
 
@@ -426,6 +436,7 @@ document.addEventListener('DOMContentLoaded', function () {
     if (activeTab && typeof activeTab.id === 'number' && isReusableNewTab(activeTab)) {
       try {
         await updateTabAsync(activeTab.id, { url, active: true });
+        closePopupWindowIfNeeded({ active });
         return;
       } catch (error) {
         console.warn('[Jade] Failed to reuse new tab, falling back to a new tab.', error);
@@ -433,6 +444,7 @@ document.addEventListener('DOMContentLoaded', function () {
     }
 
     await createTabAsync({ url, active: true });
+    closePopupWindowIfNeeded({ active });
   }
 
   function pruneDeadLinkProbeCache() {
