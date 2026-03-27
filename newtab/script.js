@@ -26,6 +26,10 @@
     bgImage: document.getElementById('bg-image'),
     bgOverlay: document.getElementById('bg-overlay'),
     copyright: document.getElementById('bg-copyright'),
+    searchContainer: document.getElementById('search-container'),
+    searchForm: document.getElementById('search-form'),
+    searchInput: document.getElementById('search-input'),
+    searchToggle: document.getElementById('search-toggle'),
     // ----- 设置与收藏面板元素 -----
     providerSelector: document.getElementById('provider-selector'),
     favBtn: document.getElementById('fav-btn'),
@@ -72,7 +76,8 @@
       NASA: 12 * 60 * 60 * 1000 // 12小时
     },
     DEFAULT_SETTINGS: {
-      provider: 'bing' // 'bing', 'nasa', 'picsum', 'favorites'
+      provider: 'bing',
+      showSearchBox: false
     },
     NETWORK: {
       REQUEST_TIMEOUT_MS: 9000,
@@ -198,6 +203,34 @@
     if (!isVisible) {
       closeNasaApiModal();
     }
+  }
+
+  function updateSearchVisibility() {
+    const isVisible = !!SettingsManager.settings.showSearchBox;
+    if (DOM.searchContainer) {
+      DOM.searchContainer.hidden = !isVisible;
+    }
+    if (DOM.searchToggle) {
+      DOM.searchToggle.checked = isVisible;
+    }
+  }
+
+  function buildSearchUrl(query) {
+    return `https://www.bing.com/search?q=${encodeURIComponent(query)}`;
+  }
+
+  function submitSearch(rawQuery) {
+    const query = String(rawQuery || '').trim();
+    if (!query) return;
+
+    if (chrome?.search && typeof chrome.search.query === 'function') {
+      chrome.search.query({ text: query }).catch(() => {
+        window.location.assign(buildSearchUrl(query));
+      });
+      return;
+    }
+
+    window.location.assign(buildSearchUrl(query));
   }
 
   function openNasaApiModal() {
@@ -642,6 +675,7 @@
     ]);
     updateNasaApiKeyStatus();
     updateNasaApiVisibility();
+    updateSearchVisibility();
     // 开始渲染背景
     renderBackground();
 
@@ -794,6 +828,21 @@
         if (e.target === DOM.nasaApiModal) {
           closeNasaApiModal();
         }
+      });
+    }
+
+    if (DOM.searchToggle) {
+      DOM.searchToggle.addEventListener('change', async (e) => {
+        SettingsManager.settings.showSearchBox = !!e.target.checked;
+        await SettingsManager.save();
+        updateSearchVisibility();
+      });
+    }
+
+    if (DOM.searchForm) {
+      DOM.searchForm.addEventListener('submit', (e) => {
+        e.preventDefault();
+        submitSearch(DOM.searchInput ? DOM.searchInput.value : '');
       });
     }
 

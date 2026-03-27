@@ -12,7 +12,8 @@
         "history",
         "sidePanel",
         "storage",
-        "downloads"
+        "downloads",
+        "search"
     ],
     "host_permissions": [
         "https://bing.ee123.net/*",

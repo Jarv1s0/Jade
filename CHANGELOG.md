@@ -1,5 +1,20 @@
 # Changelog
 
+## 2026-03-27
+
+### Added
+- Added an optional new tab search box with a local on/off toggle and localized menu copy.
+- Added support for using Chrome's current default search engine from the new tab search box via the `search` extension permission.
+
+### Changed
+- Updated the new tab search box to a dark glass style and moved it higher to better match the native Chrome new tab visual balance.
+- Updated the refresh button hint from "right-click to change source" to "right-click for settings".
+- Refined the new tab source menu structure so wallpaper source, search toggle, and NASA API Key settings read more like a compact settings panel.
+
+### Fixed
+- Removed the blue square focus ring from the search input so focus feedback stays on the outer search field.
+- Kept the NASA API Key title and content inside the same card to avoid split visual hierarchy in the settings menu.
+
 ## 2026-03-26
 
 ### Changed

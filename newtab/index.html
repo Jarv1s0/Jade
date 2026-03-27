@@ -17,6 +17,17 @@
     <div id="bg-overlay"></div>
   </div>
 
+  <div id="search-container" hidden>
+    <form id="search-form" class="search-box" role="search" aria-label="Web search">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"
+        stroke-linejoin="round" aria-hidden="true">
+        <circle cx="11" cy="11" r="7"></circle>
+        <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
+      </svg>
+      <input id="search-input" type="search" spellcheck="false" autocomplete="off"
+        data-i18n-placeholder="newtab.search.placeholder" placeholder="搜索网页">
+    </form>
+  </div>
 
   <!-- 壁纸版权信息 -->
   <footer id="bg-credit">
@@ -47,7 +58,7 @@
   <!-- 刷新/图库 悬浮组 -->
   <div class="refresh-wrapper" id="refresh-wrapper">
     <!-- 刷新按钮 -->
-    <button id="refresh-btn" class="floating-btn" data-i18n-title="newtab.refreshWallpaper" data-i18n-aria-label="newtab.refreshWallpaperAria" title="更新壁纸 (右键切换源)" aria-label="更新壁纸">
+    <button id="refresh-btn" class="floating-btn" data-i18n-title="newtab.refreshWallpaper" data-i18n-aria-label="newtab.refreshWallpaperAria" title="更新壁纸 (右键设置)" aria-label="更新壁纸">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"
         stroke-linejoin="round">
         <polyline points="23 4 23 10 17 10"></polyline>
@@ -58,6 +69,7 @@
 
     <!-- 悬浮弹出的图库菜单 -->
     <div class="source-menu" id="source-menu">
+      <div class="source-menu-section-title" data-i18n="newtab.sections.wallpaperSource">壁纸源</div>
       <div class="radio-group" id="provider-selector">
         <label class="provider-option">
           <input type="radio" name="provider" value="bing">
@@ -86,6 +98,13 @@
           </span>
         </label>
       </div>
+      <label class="toggle-row" for="search-toggle">
+        <span class="toggle-row-text" data-i18n="newtab.search.toggle">显示搜索框</span>
+        <span class="toggle-switch">
+          <input id="search-toggle" type="checkbox" aria-label="Toggle search box">
+          <span class="toggle-slider" aria-hidden="true"></span>
+        </span>
+      </label>
       <div id="nasa-api-panel" class="source-menu-note" hidden>
         <div class="source-menu-note-title" data-i18n="newtab.nasaApi.title">NASA API Key</div>
         <div id="nasa-api-status" class="source-menu-note-text"></div>

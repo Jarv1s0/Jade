@@ -247,15 +247,22 @@
         pageTitle: '新标签页',
         wallpaperStoryTitle: '点击查看壁纸故事',
         closeStory: '关闭',
+        search: {
+          placeholder: '搜索网页',
+          toggle: '显示搜索框'
+        },
         favoriteWallpaper: '收藏这张壁纸',
         unfavoriteWallpaper: '取消收藏',
-        refreshWallpaper: '更新壁纸 (右键切换源)',
+        refreshWallpaper: '更新壁纸 (右键设置)',
         refreshWallpaperAria: '更新壁纸',
         providers: {
           bing: '必应主页',
           nasa: 'NASA天文',
           picsum: '无尽随机',
           favorites: '我的收藏'
+        },
+        sections: {
+          wallpaperSource: '壁纸源'
         },
         nasaApi: {
           title: 'NASA API Key',
@@ -525,15 +532,22 @@
         pageTitle: 'New Tab',
         wallpaperStoryTitle: 'Click to read the wallpaper story',
         closeStory: 'Close',
+        search: {
+          placeholder: 'Search the web',
+          toggle: 'Show search box'
+        },
         favoriteWallpaper: 'Favorite this wallpaper',
         unfavoriteWallpaper: 'Remove favorite',
-        refreshWallpaper: 'Refresh wallpaper (right-click to change source)',
+        refreshWallpaper: 'Refresh wallpaper (right-click for settings)',
         refreshWallpaperAria: 'Refresh wallpaper',
         providers: {
           bing: 'Bing Home',
           nasa: 'NASA APOD',
           picsum: 'Endless Random',
           favorites: 'Favorites'
+        },
+        sections: {
+          wallpaperSource: 'Wallpaper Source'
         },
         nasaApi: {
           title: 'NASA API Key',
