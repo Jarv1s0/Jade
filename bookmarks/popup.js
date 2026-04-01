@@ -26,6 +26,7 @@ document.addEventListener('DOMContentLoaded', function () {
 
   // 底部按钮
   const btnManageBookmarksBtn = document.getElementById('btnManageBookmarksBtn');
+  const btnHistoryBtn = document.getElementById('btnHistoryBtn');
   const openToolboxBtn = document.getElementById('btnToolsMain');
 
   // 工具箱模态框
@@ -673,6 +674,12 @@ document.addEventListener('DOMContentLoaded', function () {
     if (btnManageBookmarksBtn) {
       btnManageBookmarksBtn.addEventListener('click', () => {
         chrome.tabs.create({ url: 'chrome://bookmarks/' });
+      });
+    }
+
+    if (btnHistoryBtn) {
+      btnHistoryBtn.addEventListener('click', () => {
+        chrome.tabs.create({ url: 'chrome://history/' });
       });
     }
 

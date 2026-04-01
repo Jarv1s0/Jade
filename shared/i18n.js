@@ -28,7 +28,7 @@
         pageTitle: 'Jade 书签启动器',
         bookmarkBar: '书签栏',
         rootFolder: '根目录',
-        searchPlaceholder: '搜索书签...',
+        searchPlaceholder: '搜索书签',
         shortcutMac: '⌘K',
         shortcutWin: 'Ctrl K',
         sections: {
@@ -38,6 +38,7 @@
         },
         footer: {
           manageBookmarks: '书签管理',
+          history: '历史记录',
           toolbox: '工具箱'
         },
         contextMenu: {
@@ -313,7 +314,7 @@
         pageTitle: 'Jade Bookmark Launcher',
         bookmarkBar: 'Bookmark Bar',
         rootFolder: 'Root',
-        searchPlaceholder: 'Search bookmarks...',
+        searchPlaceholder: 'Search bookmarks',
         shortcutMac: '⌘K',
         shortcutWin: 'Ctrl K',
         sections: {
@@ -323,6 +324,7 @@
         },
         footer: {
           manageBookmarks: 'Manage Bookmarks',
+          history: 'History',
           toolbox: 'Toolbox'
         },
         contextMenu: {

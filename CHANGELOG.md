@@ -1,5 +1,13 @@
 # Changelog
 
+## 2026-04-01
+
+### Added
+- Added a "History" button in the popup footer to open `chrome://history/` in one click.
+
+### Changed
+- Removed trailing ellipsis from the search placeholder text for a cleaner look.
+
 ## 2026-03-27
 
 ### Added
