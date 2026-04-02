@@ -106,7 +106,7 @@
 
 	/* --- 1. 底部辅助区域 (统一水平栏) --- */
 	footer {
-	  padding: 8px 12px;
+	  padding: 8px 16px 8px 10px;
 	  display: flex;
 	  align-items: center;
 	  gap: 10px;
@@ -123,7 +123,7 @@
 	  display: flex;
 	  align-items: center;
 	  flex: 1;
-	  min-width: 120px;
+	  min-width: 0;
 	}
 
 	.search-icon {
@@ -138,7 +138,7 @@
 	.search-input {
 	  width: 100%;
 	  height: 32px;
-	  padding: 0 10px 0 30px;
+	  padding: 0 56px 0 30px;
 	  border-radius: var(--radius-sm);
 	  border: 1px solid var(--border-color);
 	  background-color: var(--bg-surface);
@@ -165,9 +165,10 @@
 	  position: absolute;
 	  right: 8px;
 	  color: var(--text-tertiary);
-	  font-size: 9px;
+	  font-size: 10px;
+	  font-weight: 500;
 	  pointer-events: none;
-	  opacity: 0.3;
+	  opacity: 0.55;
 	}
 
 	@media (max-width: 350px) {
@@ -555,13 +556,13 @@
 	  justify-content: center;
 	  gap: 6px;
 	  padding: 0 10px;
-	  height: 34px;
+	  height: 32px;
 	  border: none;
 	  background: transparent;
 	  color: var(--text-tertiary);
 	  font-size: 12px;
 	  font-weight: 500;
-	  line-height: 34px;
+	  line-height: 32px;
 	  cursor: pointer;
 	  border-radius: var(--radius-md);
 	  transition: all 0.2s ease;
@@ -572,6 +573,16 @@
 	.footer-icon-btn:hover {
 	  background-color: var(--bg-hover);
 	  color: var(--text-primary);
+	}
+
+	.footer-icon-btn:focus {
+	  outline: none;
+	}
+
+	.footer-icon-btn:focus-visible {
+	  background-color: var(--bg-hover);
+	  color: var(--text-primary);
+	  box-shadow: inset 0 0 0 2px var(--ring-color);
 	}
 
 	.icon-btn {

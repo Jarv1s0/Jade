@@ -1707,6 +1707,185 @@ document.addEventListener('DOMContentLoaded', function () {
     }, 4000);
   }
 
+  function getErrorMessage(error, fallback) {
+    if (error && typeof error === 'object' && typeof error.message === 'string' && error.message.trim()) {
+      return error.message.trim();
+    }
+    if (typeof error === 'string' && error.trim()) {
+      return error.trim();
+    }
+    return fallback;
+  }
+
+  function runChromeBookmarkMutation(executor) {
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      const done = () => {
+        if (settled) return;
+        settled = true;
+        const runtimeError = chrome.runtime && chrome.runtime.lastError;
+        if (runtimeError) {
+          reject(new Error(runtimeError.message || t('popup.tools.cleanFailedReason', null, 'Unknown bookmark error')));
+          return;
+        }
+        resolve();
+      };
+
+      try {
+        executor(done);
+      } catch (error) {
+        settled = true;
+        reject(error instanceof Error ? error : new Error(String(error || t('popup.tools.cleanFailedReason', null, 'Unknown bookmark error'))));
+      }
+    });
+  }
+
+  function removeBookmarkAsync(bookmarkId) {
+    return runChromeBookmarkMutation((done) => chrome.bookmarks.remove(bookmarkId, done));
+  }
+
+  function removeBookmarkTreeAsync(folderId) {
+    return runChromeBookmarkMutation((done) => chrome.bookmarks.removeTree(folderId, done));
+  }
+
+  function getBookmarkRemoveAction(isFolder) {
+    return isFolder ? removeBookmarkTreeAsync : removeBookmarkAsync;
+  }
+
+  function resetToolCleanupButton(button, idleText) {
+    if (!button) return;
+    button.disabled = false;
+    button.textContent = idleText || t('popup.tools.cleanRunning', null, 'Deleting...');
+  }
+
+  async function refreshToolDetailAfterCleanup(options = {}) {
+    const {
+      successCount = 0,
+      failedCount = 0,
+      afterSuccess,
+      rescanButtonId
+    } = options;
+
+    if (successCount <= 0) return false;
+
+    invalidateBookmarkTreeCache();
+    refreshView();
+
+    if (typeof afterSuccess === 'function') {
+      try {
+        await afterSuccess({ successCount, failedCount });
+        return true;
+      } catch (error) {
+        console.warn('[Jade] Tool batch cleanup post-refresh failed:', error);
+      }
+    }
+
+    const rescanBtn = rescanButtonId ? document.getElementById(rescanButtonId) : null;
+    if (!rescanBtn || rescanBtn.disabled) return false;
+    rescanBtn.click();
+    return true;
+  }
+
+  async function runSingleBookmarkDelete(bookmarkId, isFolder) {
+    if (!bookmarkId) return;
+
+    showToast(t('popup.tools.cleanRunning', null, 'Deleting...'));
+
+    try {
+      await getBookmarkRemoveAction(isFolder)(bookmarkId);
+      refreshView();
+      showToast(t('popup.toasts.toolCleanDone', { count: 1 }, 'Deleted 1 item'));
+    } catch (error) {
+      const reason = getErrorMessage(
+        error,
+        t('popup.tools.cleanFailedReason', null, 'Unknown bookmark error')
+      );
+
+      console.warn('[Jade] Single bookmark delete failed:', error);
+      showToast(t('popup.toasts.toolCleanFailed', { reason }, `Delete failed: ${reason}`));
+    }
+  }
+
+  async function runToolBatchCleanup(options) {
+    const {
+      button,
+      ids,
+      removeFn,
+      rescanButtonId,
+      idleText,
+      afterSuccess
+    } = options || {};
+
+    const cleanButton = button || null;
+    const selectedIds = Array.isArray(ids) ? ids.filter(Boolean) : [];
+    if (!cleanButton || selectedIds.length === 0 || typeof removeFn !== 'function') return;
+
+    cleanButton.className = 'tool-btn tool-btn-danger';
+    cleanButton.disabled = true;
+    cleanButton.textContent = t('popup.tools.cleanRunning', null, 'Deleting...');
+    setToolDetailStatusText(t('popup.tools.scanCleanWorking', null, 'Working: removing selected items...'));
+
+    const results = await Promise.allSettled(selectedIds.map((id) => removeFn(id)));
+    const failed = results.filter((result) => result.status === 'rejected');
+    const successCount = selectedIds.length - failed.length;
+    const detailRefreshTriggered = await refreshToolDetailAfterCleanup({
+      successCount,
+      failedCount: failed.length,
+      afterSuccess,
+      rescanButtonId
+    });
+
+    if (failed.length === 0) {
+      if (!detailRefreshTriggered) {
+        setToolDetailStatusText(
+          t('popup.tools.cleanDone', { count: successCount }, `Complete: deleted ${successCount} items.`),
+          'success'
+        );
+      }
+      showToast(t('popup.toasts.toolCleanDone', { count: successCount }, `Deleted ${successCount} items`));
+      if (!detailRefreshTriggered) {
+        resetToolCleanupButton(cleanButton, idleText);
+      }
+      return;
+    }
+
+    const reason = getErrorMessage(
+      failed[0].reason,
+      t('popup.tools.cleanFailedReason', null, 'Unknown bookmark error')
+    );
+
+    if (successCount > 0) {
+      setToolDetailStatusText(
+        t(
+          'popup.tools.cleanPartial',
+          { success: successCount, failed: failed.length, reason },
+          `Complete: deleted ${successCount} items, ${failed.length} failed (${reason}).`
+        ),
+        'warning',
+        true
+      );
+      showToast(
+        t(
+          'popup.toasts.toolCleanPartial',
+          { success: successCount, failed: failed.length },
+          `Deleted ${successCount} items, ${failed.length} failed`
+        )
+      );
+    } else {
+      setToolDetailStatusText(
+        t('popup.tools.cleanFailed', { reason }, `Delete failed: ${reason}`),
+        'error',
+        true
+      );
+      showToast(t('popup.toasts.toolCleanFailed', { reason }, `Delete failed: ${reason}`));
+    }
+
+    console.warn('[Jade] Tool batch cleanup failed:', failed.map((item) => item.reason));
+    if (!detailRefreshTriggered) {
+      resetToolCleanupButton(cleanButton, idleText);
+    }
+  }
+
   function removeFromPinnedWithUndo(id, oldIndex) {
     const orderBefore = Array.from(pinnedIds);
     const frequentOrderBefore = [...frequentOrder];
@@ -1880,11 +2059,7 @@ document.addEventListener('DOMContentLoaded', function () {
         ? t('popup.confirm.deleteFolder', null, 'Delete this folder and all of its children?')
         : t('popup.confirm.deleteBookmark', null, 'Delete this bookmark?');
       if (!(await confirmDangerAction(confirmMessage, { okText: t('common.delete', null, 'Delete') }))) return;
-      if (targetNodeIsFolder) {
-        chrome.bookmarks.removeTree(targetNodeId, refreshView);
-      } else {
-        chrome.bookmarks.remove(targetNodeId, refreshView);
-      }
+      await runSingleBookmarkDelete(targetNodeId, targetNodeIsFolder);
     });
 
     // Edit modal actions
@@ -1989,6 +2164,101 @@ document.addEventListener('DOMContentLoaded', function () {
     toolboxViewController.closeToolView();
   }
 
+  function runDuplicateScan(scanButton, options = {}) {
+    const btn = scanButton || document.getElementById('btnStartFindDuplicates');
+    if (!btn) return;
+
+    const { forceRefresh = false } = options;
+
+    btn.className = 'tool-btn tool-btn-primary';
+    btn.disabled = true;
+    btn.textContent = t('popup.tools.statusRunning', null, 'Working...');
+    toolDetailStatus.style.display = 'flex';
+    setToolDetailStatusText(t('popup.tools.duplicatesScanning', null, 'Running: scanning the full bookmark library...'));
+    toolDetailFooter.style.display = 'none';
+    toolDetailFooter.style.justifyContent = '';
+    toolDetailFooter.innerHTML = '';
+    setToolsResultMessage(t('popup.tools.statusRunning', null, 'Working...'));
+
+    getBookmarkTreeCached((tree) => {
+      const urlMap = new Map();
+      function traverse(nodes) {
+        nodes.forEach(node => {
+          if (node.url) {
+            const u = node.url.trim();
+            if (u) {
+              if (!urlMap.has(u)) urlMap.set(u, []);
+              urlMap.get(u).push(node);
+            }
+          }
+          if (node.children) traverse(node.children);
+        });
+      }
+      traverse(tree);
+
+      const duplicateGroups = [];
+      urlMap.forEach((nodes, url) => {
+        if (nodes.length > 1) duplicateGroups.push({ url, nodes });
+      });
+
+      if (duplicateGroups.length === 0) {
+        setToolDetailStatusText(t('popup.tools.duplicatesNone', null, 'Scan complete: no duplicate bookmarks found.'), 'success');
+        setToolsResultMessage(t('popup.tools.cleanLibrary', null, '🎉 Your bookmark library is very clean!'));
+        document.getElementById('statusDuplicates').textContent = t('popup.tools.duplicatesLastStatusZero', null, 'Last scan: 0 duplicates');
+        toolDetailFooter.style.display = 'none';
+        toolDetailFooter.innerHTML = '';
+        btn.disabled = false;
+        btn.textContent = t('popup.tools.duplicatesRescan', null, 'Scan Again');
+        btn.className = 'tool-btn tool-btn-secondary';
+        return;
+      }
+
+      setToolDetailStatusText(t('popup.tools.duplicatesDone', { count: duplicateGroups.length }, `Scan complete: ${duplicateGroups.length} duplicate URL groups found.`), 'warning', true);
+      document.getElementById('statusDuplicates').textContent = t('popup.tools.duplicatesLastStatus', { count: duplicateGroups.length }, `Last scan: ${duplicateGroups.length} duplicate groups`);
+
+      let html = '';
+      duplicateGroups.forEach(group => {
+        html += `<div class="tool-check-group">
+                                    <div class="tool-check-url">${escapeHtml(group.url)}</div>`;
+        group.nodes.forEach((node, nIdx) => {
+          const shouldCheck = nIdx > 0;
+          html += `<div class="tool-check-item">
+                                        <input type="checkbox" class="duplicate-checkbox" data-id="${node.id}" ${shouldCheck ? 'checked' : ''}>
+                                        <span class="tool-check-label" title="${escapeHtml(node.title)}">${escapeHtml(node.title || t('common.untitled', null, 'Untitled'))}</span>
+                                       </div>`;
+        });
+        html += `</div>`;
+      });
+
+      toolDetailFooter.style.display = 'flex';
+      toolDetailFooter.innerHTML = `<button id="btnCleanDuplicates" class="tool-btn tool-btn-danger">${escapeHtml(t('popup.tools.duplicatesClean', null, 'Delete Selected'))}</button>`;
+      toolsResultList.innerHTML = html;
+      btn.disabled = false;
+      btn.textContent = t('popup.tools.duplicatesRescan', null, 'Scan Again');
+      btn.className = 'tool-btn tool-btn-secondary';
+
+      document.getElementById('btnCleanDuplicates').addEventListener('click', async (eClean) => {
+        const checkboxes = toolsResultList.querySelectorAll('.duplicate-checkbox:checked');
+        if (checkboxes.length === 0) return;
+        const cleanButton = eClean.currentTarget;
+        if (!(await confirmDangerAction(
+          t('popup.tools.duplicatesConfirm', { count: checkboxes.length }, `Delete the selected ${checkboxes.length} duplicate bookmarks?`),
+          { okText: t('common.delete', null, 'Delete') }
+        ))) return;
+        await runToolBatchCleanup({
+          button: cleanButton,
+          ids: Array.from(checkboxes).map((cb) => cb.getAttribute('data-id')),
+          removeFn: removeBookmarkAsync,
+          idleText: t('popup.tools.duplicatesClean', null, 'Delete Selected'),
+          afterSuccess: async () => {
+            await new Promise((resolve) => setTimeout(resolve, 0));
+            runDuplicateScan(btn, { forceRefresh: true });
+          }
+        });
+      });
+    }, { forceRefresh });
+  }
+
   function setupToolsListeners() {
     importFileInput.addEventListener('change', handleImport);
 
@@ -2062,89 +2332,7 @@ document.addEventListener('DOMContentLoaded', function () {
         toolDetailWarning.innerHTML = t('popup.tools.duplicatesWarning', null, '💡 Duplicates are detected by exact URL match. Bulk cleanup cannot be undone.');
 
         document.getElementById('btnStartFindDuplicates').addEventListener('click', (e) => {
-          const btn = e.target;
-          btn.className = 'tool-btn tool-btn-primary';
-          btn.disabled = true;
-          btn.textContent = t('popup.tools.statusRunning', null, 'Working...');
-          toolDetailStatus.style.display = 'flex';
-          setToolDetailStatusText(t('popup.tools.duplicatesScanning', null, 'Running: scanning the full bookmark library...'));
-          setToolsResultMessage(t('popup.tools.statusRunning', null, 'Working...'));
-
-          getBookmarkTreeCached((tree) => {
-            const urlMap = new Map();
-            function traverse(nodes) {
-              nodes.forEach(node => {
-                if (node.url) {
-                  const u = node.url.trim();
-                  if (u) {
-                    if (!urlMap.has(u)) urlMap.set(u, []);
-                    urlMap.get(u).push(node);
-                  }
-                }
-                if (node.children) traverse(node.children);
-              });
-            }
-            traverse(tree);
-
-            let duplicateGroups = [];
-            urlMap.forEach((nodes, url) => {
-              if (nodes.length > 1) duplicateGroups.push({ url, nodes });
-            });
-
-            if (duplicateGroups.length === 0) {
-              setToolDetailStatusText(t('popup.tools.duplicatesNone', null, 'Scan complete: no duplicate bookmarks found.'), 'success');
-              setToolsResultMessage(t('popup.tools.cleanLibrary', null, '🎉 Your bookmark library is very clean!'));
-              document.getElementById('statusDuplicates').textContent = t('popup.tools.duplicatesLastStatusZero', null, 'Last scan: 0 duplicates');
-              btn.disabled = false;
-              btn.textContent = t('popup.tools.duplicatesRescan', null, 'Scan Again');
-              btn.className = 'tool-btn tool-btn-secondary';
-              return;
-            }
-
-            setToolDetailStatusText(t('popup.tools.duplicatesDone', { count: duplicateGroups.length }, `Scan complete: ${duplicateGroups.length} duplicate URL groups found.`), 'warning', true);
-            document.getElementById('statusDuplicates').textContent = t('popup.tools.duplicatesLastStatus', { count: duplicateGroups.length }, `Last scan: ${duplicateGroups.length} duplicate groups`);
-
-            let html = '';
-            duplicateGroups.forEach(group => {
-              html += `<div class="tool-check-group">
-                                    <div class="tool-check-url">${escapeHtml(group.url)}</div>`;
-              group.nodes.forEach((node, nIdx) => {
-                const shouldCheck = nIdx > 0;
-                html += `<div class="tool-check-item">
-                                        <input type="checkbox" class="duplicate-checkbox" data-id="${node.id}" ${shouldCheck ? 'checked' : ''}>
-                                        <span class="tool-check-label" title="${escapeHtml(node.title)}">${escapeHtml(node.title || t('common.untitled', null, 'Untitled'))}</span>
-                                       </div>`;
-              });
-              html += `</div>`;
-            });
-
-            toolDetailFooter.style.display = 'flex';
-            toolDetailFooter.innerHTML = `<button id="btnCleanDuplicates" class="tool-btn tool-btn-danger">${escapeHtml(t('popup.tools.duplicatesClean', null, 'Delete Selected'))}</button>`;
-            toolsResultList.innerHTML = html;
-            btn.disabled = false;
-            btn.textContent = t('popup.tools.duplicatesRescan', null, 'Scan Again');
-            btn.className = 'tool-btn tool-btn-secondary';
-
-            document.getElementById('btnCleanDuplicates').addEventListener('click', async (eClean) => {
-              const checkboxes = toolsResultList.querySelectorAll('.duplicate-checkbox:checked');
-              if (checkboxes.length === 0) return;
-              if (!(await confirmDangerAction(
-                t('popup.tools.duplicatesConfirm', { count: checkboxes.length }, `Delete the selected ${checkboxes.length} duplicate bookmarks?`),
-                { okText: t('common.delete', null, 'Delete') }
-              ))) return;
-              eClean.target.className = 'tool-btn tool-btn-danger';
-              eClean.target.disabled = true;
-              eClean.target.textContent = t('popup.tools.cleanRunning', null, 'Deleting...');
-              setToolDetailStatusText(t('popup.tools.scanCleanWorking', null, 'Working: removing selected items...'));
-              let promises = Array.from(checkboxes).map(cb => {
-                return new Promise(res => chrome.bookmarks.remove(cb.getAttribute('data-id'), res));
-              });
-              Promise.all(promises).then(() => {
-                document.getElementById('btnStartFindDuplicates').click(); // Rescan
-                refreshView();
-              });
-            });
-          });
+          runDuplicateScan(e.currentTarget);
         });
       });
     }
@@ -2461,6 +2649,7 @@ document.addEventListener('DOMContentLoaded', function () {
             document.getElementById('btnCleanBrokenLinks').addEventListener('click', async (eClean) => {
               const checkboxes = toolsResultList.querySelectorAll('.broken-checkbox:checked');
               if (checkboxes.length === 0) return;
+              const cleanButton = eClean.currentTarget;
               if (!(await confirmDangerAction(
                 t('popup.tools.brokenConfirmDelete', { count: checkboxes.length }, `Delete the selected ${checkboxes.length} links?`),
                 {
@@ -2470,16 +2659,12 @@ document.addEventListener('DOMContentLoaded', function () {
                     : t('popup.tools.brokenDangerHint', null, 'High-confidence broken links are included, but a quick manual review is still recommended.')
                 }
               ))) return;
-              eClean.target.className = 'tool-btn tool-btn-danger';
-              eClean.target.disabled = true;
-              eClean.target.textContent = t('popup.tools.cleanRunning', null, 'Deleting...');
-              setToolDetailStatusText(t('popup.tools.scanCleanWorking', null, 'Working: removing selected items...'));
-              let promises = Array.from(checkboxes).map(cb => {
-                return new Promise(res => chrome.bookmarks.remove(cb.getAttribute('data-id'), res));
-              });
-              Promise.all(promises).then(() => {
-                document.getElementById('btnStartCheckBroken').click();
-                refreshView();
+              await runToolBatchCleanup({
+                button: cleanButton,
+                ids: Array.from(checkboxes).map((cb) => cb.getAttribute('data-id')),
+                removeFn: removeBookmarkAsync,
+                rescanButtonId: 'btnStartCheckBroken',
+                idleText: t('popup.tools.brokenClean', null, 'Delete Selected')
               });
             });
           });
@@ -2528,6 +2713,8 @@ document.addEventListener('DOMContentLoaded', function () {
               setToolDetailStatusText(t('popup.tools.emptyFoldersNone', null, 'Scan complete: no empty folders found.'), 'success');
               setToolsResultMessage(t('popup.tools.cleanLibrary', null, '🎉 Your bookmark library is very clean!'));
               document.getElementById('statusEmptyFolders').textContent = t('popup.tools.emptyFoldersLastStatusZero', null, 'Last scan: 0 empty folders');
+              toolDetailFooter.style.display = 'none';
+              toolDetailFooter.innerHTML = '';
               btn.disabled = false;
               btn.textContent = t('popup.tools.duplicatesRescan', null, 'Scan Again');
               btn.className = 'tool-btn tool-btn-secondary';
@@ -2557,20 +2744,17 @@ document.addEventListener('DOMContentLoaded', function () {
             document.getElementById('btnCleanFolders').addEventListener('click', async (eClean) => {
               const checkboxes = toolsResultList.querySelectorAll('.empty-folder-checkbox:checked');
               if (checkboxes.length === 0) return;
+              const cleanButton = eClean.currentTarget;
               if (!(await confirmDangerAction(
                 t('popup.tools.emptyFoldersConfirm', { count: checkboxes.length }, `Delete the selected ${checkboxes.length} empty folders?`),
                 { okText: t('common.delete', null, 'Delete') }
               ))) return;
-              eClean.target.className = 'tool-btn tool-btn-danger';
-              eClean.target.disabled = true;
-              eClean.target.textContent = t('popup.tools.cleanRunning', null, 'Deleting...');
-              setToolDetailStatusText(t('popup.tools.scanCleanWorking', null, 'Working: removing selected items...'));
-              let promises = Array.from(checkboxes).map(cb => {
-                return new Promise(res => chrome.bookmarks.removeTree(cb.getAttribute('data-id'), res));
-              });
-              Promise.all(promises).then(() => {
-                document.getElementById('btnStartCleanEmpty').click(); // Run again in case parent became empty
-                refreshView();
+              await runToolBatchCleanup({
+                button: cleanButton,
+                ids: Array.from(checkboxes).map((cb) => cb.getAttribute('data-id')),
+                removeFn: removeBookmarkTreeAsync,
+                rescanButtonId: 'btnStartCleanEmpty',
+                idleText: t('popup.tools.emptyFoldersClean', null, 'Delete Selected')
               });
             });
           });
@@ -2719,8 +2903,22 @@ document.addEventListener('DOMContentLoaded', function () {
         url: url,
         filename: `bookmarks_${dateStr}.html`,
         saveAs: true
-      }, () => {
+      }, (downloadId) => {
         URL.revokeObjectURL(url);
+        const runtimeError = chrome.runtime && chrome.runtime.lastError;
+        if (runtimeError || typeof downloadId !== 'number') {
+          const reason = runtimeError && runtimeError.message
+            ? runtimeError.message
+            : t('popup.reasons.unknown', null, 'Unknown reason');
+          setToolDetailStatusText(t('popup.tools.exportFailed', { reason }, `Status: export failed (${reason})`), 'error');
+          setToolsResultMessage(t('popup.tools.exportFailed', { reason }, `Status: export failed (${reason})`), 'error');
+          if (btn) {
+            btn.disabled = false;
+            btn.textContent = t('popup.tools.exportRetry', null, 'Export Again');
+            btn.className = 'tool-btn tool-btn-secondary';
+          }
+          return;
+        }
         setToolDetailStatusText(t('popup.tools.exportDone', null, 'Status: export complete'), 'success');
         setToolsResultMessage(t('popup.tools.exportQueued', { date: dateStr }, `Export started (${dateStr})`));
         if (btn) {

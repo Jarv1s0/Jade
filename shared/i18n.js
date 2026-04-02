@@ -28,7 +28,7 @@
         pageTitle: 'Jade 书签启动器',
         bookmarkBar: '书签栏',
         rootFolder: '根目录',
-        searchPlaceholder: '搜索书签',
+        searchPlaceholder: '',
         shortcutMac: '⌘K',
         shortcutWin: 'Ctrl K',
         sections: {
@@ -69,7 +69,10 @@
           featureInProgress: '开发中：支持将其添加到我的分组',
           removedFromRecent: '已从最近访问列表移除',
           maxPinned: '我的置顶最多只能添加 8 个网站',
-          addedToPinned: '已添加到我的置顶'
+          addedToPinned: '已添加到我的置顶',
+          toolCleanDone: '已删除 {{count}} 项',
+          toolCleanPartial: '已删除 {{success}} 项，失败 {{failed}} 项',
+          toolCleanFailed: '删除失败：{{reason}}'
         },
         edit: {
           titleFolder: '编辑文件夹',
@@ -123,6 +126,7 @@
           exportWarning: '💡 提示：导出书签将把当前所有书签及目录结构备份为一个标准 HTML 文件，可用于在其他浏览器中恢复。',
           exportGenerating: '状态：正在生成...',
           exportDone: '状态：导出成功',
+          exportFailed: '状态：导出失败（{{reason}}）',
           exportQueued: '导出任务已提交 ({{date}})',
           exportRetry: '重新导出',
           duplicatesTitle: '扫描重复',
@@ -225,9 +229,15 @@
           batchReplaceRunning: '<div class="url-inline-spinner"><svg class="spin-icon" viewBox="0 0 24 24" fill="none" width="14" height="14" stroke="currentColor" stroke-width="2"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg> 正在替换...</div>',
           batchReplaceExecuting: '正在执行替换...',
           batchReplaceDone: '🎉 已成功替换 {{count}} 条 URL',
+          batchReplacePartial: '已替换 {{success}} 条，失败 {{failed}} 条（{{reason}}）',
+          batchReplaceFailed: '替换失败：{{reason}}',
           batchReplaceLastStatus: '上次替换：{{count}} 项',
           batchReplaceDoneButton: '完成并返回',
           scanCleanWorking: '处理中：正在移除选中项...',
+          cleanDone: '处理完成：已删除 {{count}} 项。',
+          cleanPartial: '处理完成：已删除 {{success}} 项，失败 {{failed}} 项（{{reason}}）。',
+          cleanFailed: '处理失败：{{reason}}',
+          cleanFailedReason: '未知书签错误',
           cleanRunning: '清理中...',
           statusRunning: '处理中...',
           cleanLibrary: '🎉 您的书签库非常整洁！'
@@ -314,7 +324,7 @@
         pageTitle: 'Jade Bookmark Launcher',
         bookmarkBar: 'Bookmark Bar',
         rootFolder: 'Root',
-        searchPlaceholder: 'Search bookmarks',
+        searchPlaceholder: '',
         shortcutMac: '⌘K',
         shortcutWin: 'Ctrl K',
         sections: {
@@ -355,7 +365,10 @@
           featureInProgress: 'In progress: add to group support',
           removedFromRecent: 'Removed from Recent',
           maxPinned: 'Pinned supports up to 8 sites',
-          addedToPinned: 'Added to Pinned'
+          addedToPinned: 'Added to Pinned',
+          toolCleanDone: 'Deleted {{count}} items',
+          toolCleanPartial: 'Deleted {{success}} items, {{failed}} failed',
+          toolCleanFailed: 'Delete failed: {{reason}}'
         },
         edit: {
           titleFolder: 'Edit Folder',
@@ -409,6 +422,7 @@
           exportWarning: '💡 Export backs up your full bookmark tree as a standard HTML file that can be restored in another browser.',
           exportGenerating: 'Status: generating export...',
           exportDone: 'Status: export complete',
+          exportFailed: 'Status: export failed ({{reason}})',
           exportQueued: 'Export started ({{date}})',
           exportRetry: 'Export Again',
           duplicatesTitle: 'Find Duplicates',
@@ -511,9 +525,15 @@
           batchReplaceRunning: '<div class="url-inline-spinner"><svg class="spin-icon" viewBox="0 0 24 24" fill="none" width="14" height="14" stroke="currentColor" stroke-width="2"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg> Replacing...</div>',
           batchReplaceExecuting: 'Applying replacements...',
           batchReplaceDone: '🎉 Replaced {{count}} URLs successfully',
+          batchReplacePartial: 'Replaced {{success}} URLs, {{failed}} failed ({{reason}})',
+          batchReplaceFailed: 'Replace failed: {{reason}}',
           batchReplaceLastStatus: 'Last replace: {{count}} items',
           batchReplaceDoneButton: 'Done',
           scanCleanWorking: 'Working: removing selected items...',
+          cleanDone: 'Complete: deleted {{count}} items.',
+          cleanPartial: 'Complete: deleted {{success}} items, {{failed}} failed ({{reason}}).',
+          cleanFailed: 'Delete failed: {{reason}}',
+          cleanFailedReason: 'Unknown bookmark error',
           cleanRunning: 'Deleting...',
           statusRunning: 'Working...',
           cleanLibrary: '🎉 Your bookmark library is very clean!'

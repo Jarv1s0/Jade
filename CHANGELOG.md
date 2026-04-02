@@ -1,5 +1,17 @@
 # Changelog
 
+## 2026-04-02
+
+### Changed
+- Refined the popup footer layout, search field spacing, and shortcut hint styling for a cleaner bookmarks popup toolbar.
+- Removed the popup search placeholder copy to reduce visual noise in the footer search field.
+
+### Fixed
+- Added visible progress and success or failure feedback for bookmark deletions triggered from the popup toolbox and context menu.
+- Fixed duplicate cleanup results so the list refreshes immediately after deletion instead of keeping stale entries until a manual rescan.
+- Fixed empty folder cleanup to clear stale action buttons when a follow-up scan finds no remaining folders.
+- Fixed batch URL replace and bookmark export flows to surface partial failures and download errors instead of reporting false success.
+
 ## 2026-04-01
 
 ### Added

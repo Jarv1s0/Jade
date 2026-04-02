@@ -1,6 +1,26 @@
 (function initUrlReplaceToolModule(global) {
   'use strict';
 
+  function updateBookmarkUrlAsync(chromeApi, bookmarkId, url) {
+    return new Promise((resolve, reject) => {
+      chromeApi.bookmarks.update(bookmarkId, { url }, () => {
+        const runtimeError = chromeApi.runtime && chromeApi.runtime.lastError;
+        if (runtimeError) {
+          reject(new Error(runtimeError.message || 'Unknown bookmark error'));
+          return;
+        }
+        resolve();
+      });
+    });
+  }
+
+  function getFailureReason(error) {
+    if (error && typeof error === 'object' && typeof error.message === 'string' && error.message) {
+      return error.message;
+    }
+    return String(error || 'Unknown reason');
+  }
+
   function bindUrlReplaceTool(deps) {
     const {
       chromeApi,
@@ -180,25 +200,53 @@
               statusArea.style.color = 'var(--text-secondary)';
               statusText.innerHTML = t('popup.tools.batchReplaceExecuting', null, 'Applying replacements...');
 
-              const updates = matches.map((item) => new Promise((resolve) => chromeApi.bookmarks.update(item.node.id, { url: item.newUrl }, resolve)));
-              Promise.all(updates).then(() => {
-                statusArea.style.color = '#34c759';
-                statusText.innerHTML = t('popup.tools.batchReplaceDone', { count: matches.length }, `🎉 Replaced ${matches.length} URLs successfully`);
-                document.getElementById('statusReplaceUrl').textContent = t('popup.tools.batchReplaceLastStatus', { count: matches.length }, `Last replace: ${matches.length} items`);
-                confirmButton.style.display = 'none';
-                if (editBtn) editBtn.style.display = 'none';
+              const setReplaceStatus = (color, message) => {
+                statusArea.style.color = color;
+                statusText.innerHTML = message;
+              };
+              const setReplaceCount = (count) => {
+                document.getElementById('statusReplaceUrl').textContent = t('popup.tools.batchReplaceLastStatus', { count }, `Last replace: ${count} items`);
+              };
 
-                const doneBtn = document.createElement('button');
-                doneBtn.className = 'tool-btn tool-btn-primary';
-                doneBtn.classList.add('tool-flex-1');
-                doneBtn.textContent = t('popup.tools.batchReplaceDoneButton', null, 'Done');
-                doneBtn.onclick = () => {
-                  closeToolView();
-                  refreshView();
-                };
-                toolDetailFooter.appendChild(doneBtn);
+              const results = await Promise.allSettled(
+                matches.map((item) => updateBookmarkUrlAsync(chromeApi, item.node.id, item.newUrl))
+              );
+              const failed = results.filter((result) => result.status === 'rejected');
+              const successCount = results.length - failed.length;
+              const firstReason = failed.length > 0 ? getFailureReason(failed[0].reason) : '';
+
+              refreshView();
+
+              if (failed.length === 0) {
+                setReplaceStatus('#34c759', t('popup.tools.batchReplaceDone', { count: successCount }, `🎉 Replaced ${successCount} URLs successfully`));
+                setReplaceCount(successCount);
+              } else if (successCount > 0) {
+                setReplaceStatus('#d97706', t(
+                  'popup.tools.batchReplacePartial',
+                  { success: successCount, failed: failed.length, reason: firstReason },
+                  `Replaced ${successCount} URLs, ${failed.length} failed (${firstReason})`
+                ));
+                setReplaceCount(successCount);
+              } else {
+                setReplaceStatus('#ff3b30', t('popup.tools.batchReplaceFailed', { reason: firstReason }, `Replace failed: ${firstReason}`));
+                confirmButton.disabled = false;
+                if (editBtn) editBtn.disabled = false;
+                confirmButton.textContent = t('popup.tools.batchReplaceConfirm', { count: matches.length }, `Replace ${matches.length}`);
+                return;
+              }
+
+              confirmButton.style.display = 'none';
+              if (editBtn) editBtn.style.display = 'none';
+
+              const doneBtn = document.createElement('button');
+              doneBtn.className = 'tool-btn tool-btn-primary';
+              doneBtn.classList.add('tool-flex-1');
+              doneBtn.textContent = t('popup.tools.batchReplaceDoneButton', null, 'Done');
+              doneBtn.onclick = () => {
+                closeToolView();
                 refreshView();
-              });
+              };
+              toolDetailFooter.appendChild(doneBtn);
             });
           });
         }, 300);
