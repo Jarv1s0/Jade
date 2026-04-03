@@ -38,7 +38,7 @@
 ## 2026-03-26
 
 ### Changed
-- Bumped the extension version to `1.2`.
+- Bumped the extension version to `1.3`.
 
 ### Fixed
 - Fixed the bookmarks popup sometimes staying open after clicking a bookmark link.

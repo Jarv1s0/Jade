@@ -1681,23 +1681,57 @@ document.addEventListener('DOMContentLoaded', function () {
   }
 
   let undoTimeout = null;
-  function showToast(msg, undoCallback = null) {
+  function resolveToastOptions(optionsOrUndo) {
+    if (typeof optionsOrUndo === 'function') {
+      return { undoCallback: optionsOrUndo, tone: 'info' };
+    }
+    if (optionsOrUndo && typeof optionsOrUndo === 'object') {
+      return {
+        undoCallback: typeof optionsOrUndo.undoCallback === 'function' ? optionsOrUndo.undoCallback : null,
+        tone: typeof optionsOrUndo.tone === 'string' && optionsOrUndo.tone ? optionsOrUndo.tone : 'info'
+      };
+    }
+    return { undoCallback: null, tone: 'info' };
+  }
+
+  function getToastIconByTone(tone) {
+    switch (tone) {
+      case 'success':
+        return '✓';
+      case 'warning':
+        return '!';
+      case 'error':
+        return '×';
+      default:
+        return 'i';
+    }
+  }
+
+  function showToast(msg, optionsOrUndo = null) {
     const toast = document.getElementById('toast');
+    const toastIcon = document.getElementById('toastIcon');
     const toastMsg = document.getElementById('toastMsg');
     const toastAction = document.getElementById('toastAction');
+    const { undoCallback, tone } = resolveToastOptions(optionsOrUndo);
 
     if (!toast) return;
 
+    toast.classList.remove('toast-info', 'toast-success', 'toast-warning', 'toast-error');
+    toast.classList.add(`toast-${tone}`);
+    if (toastIcon) {
+      toastIcon.textContent = getToastIconByTone(tone);
+    }
     toastMsg.textContent = msg;
     if (undoCallback) {
-      toastAction.style.display = 'block';
+      toastAction.classList.remove('is-hidden');
       toastAction.onclick = () => {
         undoCallback();
         toast.classList.remove('show');
         if (undoTimeout) clearTimeout(undoTimeout);
       };
     } else {
-      toastAction.style.display = 'none';
+      toastAction.classList.add('is-hidden');
+      toastAction.onclick = null;
     }
 
     toast.classList.add('show');
@@ -1758,12 +1792,139 @@ document.addEventListener('DOMContentLoaded', function () {
     button.textContent = idleText || t('popup.tools.cleanRunning', null, 'Deleting...');
   }
 
+  function removeRenderedToolItemsByIds(checkboxSelector, successIds) {
+    if (!toolsResultList || !Array.isArray(successIds) || successIds.length === 0) return;
+
+    const idSet = new Set(successIds.map((id) => String(id)));
+    toolsResultList.querySelectorAll(checkboxSelector).forEach((checkbox) => {
+      const itemId = checkbox.getAttribute('data-id');
+      if (!itemId || !idSet.has(String(itemId))) return;
+
+      const itemRow = checkbox.closest('.tool-check-item');
+      if (!itemRow) return;
+
+      const detailRow = itemRow.nextElementSibling;
+      itemRow.remove();
+      if (detailRow && detailRow.classList.contains('tool-check-url')) {
+        detailRow.remove();
+      }
+    });
+  }
+
+  function setCleanupEmptyState(statusText, resultText, summaryElementId, summaryText) {
+    setToolDetailStatusText(statusText, 'success');
+    setToolsResultMessage(resultText);
+    document.getElementById(summaryElementId).textContent = summaryText;
+    toolDetailFooter.style.display = 'none';
+    toolDetailFooter.innerHTML = '';
+  }
+
+  function updateDuplicateCleanupView(successIds, idleText) {
+    removeRenderedToolItemsByIds('.duplicate-checkbox', successIds);
+
+    toolsResultList.querySelectorAll('.tool-check-group').forEach((group) => {
+      if (group.querySelectorAll('.duplicate-checkbox').length < 2) {
+        group.remove();
+      }
+    });
+
+    const remainingGroups = toolsResultList.querySelectorAll('.tool-check-group').length;
+    if (remainingGroups === 0) {
+      setCleanupEmptyState(
+        t('popup.tools.duplicatesNone', null, 'Scan complete: no duplicate bookmarks found.'),
+        t('popup.tools.cleanLibrary', null, '🎉 Your bookmark library is very clean!'),
+        'statusDuplicates',
+        t('popup.tools.duplicatesLastStatusZero', null, 'Last scan: 0 duplicates')
+      );
+      return;
+    }
+
+    setToolDetailStatusText(
+      t('popup.tools.duplicatesDone', { count: remainingGroups }, `Scan complete: ${remainingGroups} duplicate URL groups found.`),
+      'warning',
+      true
+    );
+    document.getElementById('statusDuplicates').textContent = t('popup.tools.duplicatesLastStatus', { count: remainingGroups }, `Last scan: ${remainingGroups} duplicate groups`);
+
+    const activeButton = document.getElementById('btnCleanDuplicates');
+    if (activeButton) resetToolCleanupButton(activeButton, idleText);
+  }
+
+  function updateBrokenCleanupView(successIds, idleText) {
+    removeRenderedToolItemsByIds('.broken-checkbox', successIds);
+
+    toolsResultList.querySelectorAll('.tool-check-group').forEach((group) => {
+      if (group.querySelectorAll('.broken-checkbox').length > 0) return;
+      const title = group.previousElementSibling;
+      group.remove();
+      if (title && title.classList.contains('tool-check-group-title')) {
+        title.remove();
+      }
+    });
+
+    const confirmedCount = toolsResultList.querySelectorAll('.tool-check-group:not(.tool-check-group-dashed) .broken-checkbox').length;
+    const reviewCount = toolsResultList.querySelectorAll('.tool-check-group-dashed .broken-checkbox').length;
+
+    if (confirmedCount === 0 && reviewCount === 0) {
+      setCleanupEmptyState(
+        t('popup.tools.brokenAllGood', { count: 0, suffix: '' }, 'Scan complete: all 0 links are reachable. '),
+        t('popup.tools.brokenAllGoodResult', null, '🎉 All links look good!'),
+        'statusBrokenLinks',
+        t('popup.tools.brokenLastStatusClean', null, 'Last scan: no broken links found')
+      );
+      return;
+    }
+
+    if (confirmedCount > 0) {
+      setToolDetailStatusText(
+        t('popup.tools.brokenDoneMixed', { broken: confirmedCount, uncertain: reviewCount, suffix: '' }, `Scan complete: ${confirmedCount} confirmed broken, ${reviewCount} need review. `),
+        'warning',
+        true
+      );
+    } else {
+      setToolDetailStatusText(
+        t('popup.tools.brokenDoneReviewOnly', { uncertain: reviewCount, suffix: '' }, `Scan complete: no high-confidence broken links found, ${reviewCount} need review. `),
+        'warning',
+        true
+      );
+    }
+    document.getElementById('statusBrokenLinks').textContent = t('popup.tools.brokenLastStatus', { broken: confirmedCount, uncertain: reviewCount }, `Last scan: ${confirmedCount} confirmed broken / ${reviewCount} review needed`);
+
+    const activeButton = document.getElementById('btnCleanBrokenLinks');
+    if (activeButton) resetToolCleanupButton(activeButton, idleText);
+  }
+
+  function updateEmptyFolderCleanupView(successIds, idleText) {
+    removeRenderedToolItemsByIds('.empty-folder-checkbox', successIds);
+
+    const remainingCount = toolsResultList.querySelectorAll('.empty-folder-checkbox').length;
+    if (remainingCount === 0) {
+      setCleanupEmptyState(
+        t('popup.tools.emptyFoldersNone', null, 'Scan complete: no empty folders found.'),
+        t('popup.tools.cleanLibrary', null, '🎉 Your bookmark library is very clean!'),
+        'statusEmptyFolders',
+        t('popup.tools.emptyFoldersLastStatusZero', null, 'Last scan: 0 empty folders')
+      );
+      return;
+    }
+
+    setToolDetailStatusText(
+      t('popup.tools.emptyFoldersDone', { count: remainingCount }, `Scan complete: found ${remainingCount} empty folders.`),
+      'warning',
+      true
+    );
+    document.getElementById('statusEmptyFolders').textContent = t('popup.tools.emptyFoldersLastStatus', { count: remainingCount }, `Last scan: ${remainingCount} empty folders`);
+
+    const activeButton = document.getElementById('btnCleanFolders');
+    if (activeButton) resetToolCleanupButton(activeButton, idleText);
+  }
+
   async function refreshToolDetailAfterCleanup(options = {}) {
     const {
       successCount = 0,
       failedCount = 0,
-      afterSuccess,
-      rescanButtonId
+      successIds = [],
+      afterSuccess
     } = options;
 
     if (successCount <= 0) return false;
@@ -1773,28 +1934,25 @@ document.addEventListener('DOMContentLoaded', function () {
 
     if (typeof afterSuccess === 'function') {
       try {
-        await afterSuccess({ successCount, failedCount });
+        await afterSuccess({ successCount, failedCount, successIds });
         return true;
       } catch (error) {
         console.warn('[Jade] Tool batch cleanup post-refresh failed:', error);
       }
     }
 
-    const rescanBtn = rescanButtonId ? document.getElementById(rescanButtonId) : null;
-    if (!rescanBtn || rescanBtn.disabled) return false;
-    rescanBtn.click();
-    return true;
+    return false;
   }
 
   async function runSingleBookmarkDelete(bookmarkId, isFolder) {
     if (!bookmarkId) return;
 
-    showToast(t('popup.tools.cleanRunning', null, 'Deleting...'));
+    showToast(t('popup.tools.cleanRunning', null, 'Deleting...'), { tone: 'info' });
 
     try {
       await getBookmarkRemoveAction(isFolder)(bookmarkId);
       refreshView();
-      showToast(t('popup.toasts.toolCleanDone', { count: 1 }, 'Deleted 1 item'));
+      showToast(t('popup.toasts.toolCleanDone', { count: 1 }, 'Deleted 1 item'), { tone: 'success' });
     } catch (error) {
       const reason = getErrorMessage(
         error,
@@ -1802,7 +1960,7 @@ document.addEventListener('DOMContentLoaded', function () {
       );
 
       console.warn('[Jade] Single bookmark delete failed:', error);
-      showToast(t('popup.toasts.toolCleanFailed', { reason }, `Delete failed: ${reason}`));
+      showToast(t('popup.toasts.toolCleanFailed', { reason }, `Delete failed: ${reason}`), { tone: 'error' });
     }
   }
 
@@ -1811,7 +1969,6 @@ document.addEventListener('DOMContentLoaded', function () {
       button,
       ids,
       removeFn,
-      rescanButtonId,
       idleText,
       afterSuccess
     } = options || {};
@@ -1827,12 +1984,13 @@ document.addEventListener('DOMContentLoaded', function () {
 
     const results = await Promise.allSettled(selectedIds.map((id) => removeFn(id)));
     const failed = results.filter((result) => result.status === 'rejected');
+    const successIds = selectedIds.filter((id, index) => results[index] && results[index].status === 'fulfilled');
     const successCount = selectedIds.length - failed.length;
     const detailRefreshTriggered = await refreshToolDetailAfterCleanup({
       successCount,
       failedCount: failed.length,
-      afterSuccess,
-      rescanButtonId
+      successIds,
+      afterSuccess
     });
 
     if (failed.length === 0) {
@@ -1842,8 +2000,8 @@ document.addEventListener('DOMContentLoaded', function () {
           'success'
         );
       }
-      showToast(t('popup.toasts.toolCleanDone', { count: successCount }, `Deleted ${successCount} items`));
-      if (!detailRefreshTriggered) {
+      showToast(t('popup.toasts.toolCleanDone', { count: successCount }, `Deleted ${successCount} items`), { tone: 'success' });
+      if (!detailRefreshTriggered || cleanButton.isConnected) {
         resetToolCleanupButton(cleanButton, idleText);
       }
       return;
@@ -1869,7 +2027,8 @@ document.addEventListener('DOMContentLoaded', function () {
           'popup.toasts.toolCleanPartial',
           { success: successCount, failed: failed.length },
           `Deleted ${successCount} items, ${failed.length} failed`
-        )
+        ),
+        { tone: 'warning' }
       );
     } else {
       setToolDetailStatusText(
@@ -1877,11 +2036,11 @@ document.addEventListener('DOMContentLoaded', function () {
         'error',
         true
       );
-      showToast(t('popup.toasts.toolCleanFailed', { reason }, `Delete failed: ${reason}`));
+      showToast(t('popup.toasts.toolCleanFailed', { reason }, `Delete failed: ${reason}`), { tone: 'error' });
     }
 
     console.warn('[Jade] Tool batch cleanup failed:', failed.map((item) => item.reason));
-    if (!detailRefreshTriggered) {
+    if (!detailRefreshTriggered || cleanButton.isConnected) {
       resetToolCleanupButton(cleanButton, idleText);
     }
   }
@@ -1894,7 +2053,7 @@ document.addEventListener('DOMContentLoaded', function () {
     savePinnedPreferences({ pinned_bookmarks: Array.from(pinnedIds) }, () => {
       if (navigationStack.length <= 1) buildDashboard();
       else refreshView();
-      showToast(t('popup.toasts.removedFromPinned', null, 'Removed from Pinned'), () => {
+      showToast(t('popup.toasts.removedFromPinned', null, 'Removed from Pinned'), { undoCallback: () => {
         // undo
         pinnedIds = new Set(orderBefore);
         frequentOrder = frequentOrderBefore;
@@ -1905,7 +2064,7 @@ document.addEventListener('DOMContentLoaded', function () {
           if (navigationStack.length <= 1) buildDashboard();
           else refreshView();
         });
-      });
+      }, tone: 'info' });
     });
   }
 
@@ -1967,7 +2126,7 @@ document.addEventListener('DOMContentLoaded', function () {
     if (menuAddToGroup) {
       menuAddToGroup.addEventListener('click', () => {
         // TODO: 接入项目已有的“添加到分组”能力。这里预留调用接口
-        showToast(t('popup.toasts.featureInProgress', null, 'In progress: add to group support'));
+        showToast(t('popup.toasts.featureInProgress', null, 'In progress: add to group support'), { tone: 'warning' });
         contextMenu.style.display = 'none';
       });
     }
@@ -1981,13 +2140,13 @@ document.addEventListener('DOMContentLoaded', function () {
           hiddenRecentUrls.push(activeUrl);
           chrome.storage.local.set({ hidden_recent_urls: hiddenRecentUrls }, () => {
             buildRecents();
-            showToast(t('popup.toasts.removedFromRecent', null, 'Removed from Recent'), () => {
+            showToast(t('popup.toasts.removedFromRecent', null, 'Removed from Recent'), { undoCallback: () => {
               // 撤销逻辑
               hiddenRecentUrls = hiddenRecentUrls.filter(u => u !== activeUrl);
               chrome.storage.local.set({ hidden_recent_urls: hiddenRecentUrls }, () => {
                 buildRecents();
               });
-            });
+            }, tone: 'info' });
           });
         }
         contextMenu.style.display = 'none';
@@ -2002,14 +2161,14 @@ document.addEventListener('DOMContentLoaded', function () {
         removeFromPinnedWithUndo(activeId, -1);
       } else {
         if (pinnedIds.size >= 8) {
-          showToast(t('popup.toasts.maxPinned', null, 'Pinned supports up to 8 sites'));
+          showToast(t('popup.toasts.maxPinned', null, 'Pinned supports up to 8 sites'), { tone: 'warning' });
           return;
         }
         pinnedIds.add(activeId);
         savePinnedPreferences({ pinned_bookmarks: Array.from(pinnedIds) }, () => {
           if (navigationStack.length <= 1) buildDashboard();
           else refreshView();
-          showToast(t('popup.toasts.addedToPinned', null, 'Added to Pinned'));
+          showToast(t('popup.toasts.addedToPinned', null, 'Added to Pinned'), { tone: 'success' });
         });
       }
     });
@@ -2250,9 +2409,8 @@ document.addEventListener('DOMContentLoaded', function () {
           ids: Array.from(checkboxes).map((cb) => cb.getAttribute('data-id')),
           removeFn: removeBookmarkAsync,
           idleText: t('popup.tools.duplicatesClean', null, 'Delete Selected'),
-          afterSuccess: async () => {
-            await new Promise((resolve) => setTimeout(resolve, 0));
-            runDuplicateScan(btn, { forceRefresh: true });
+          afterSuccess: async ({ successIds }) => {
+            updateDuplicateCleanupView(successIds, t('popup.tools.duplicatesClean', null, 'Delete Selected'));
           }
         });
       });
@@ -2360,20 +2518,39 @@ document.addEventListener('DOMContentLoaded', function () {
             let totalFolders = 0;
             let maxDepth = 0;
             let emptyFolders = 0;
+            let httpsCount = 0;
+            let httpCount = 0;
+            let otherProtocolCount = 0;
+            let untitledItems = 0;
+            let rootLevelBookmarks = 0;
             const domainMap = new Map();
             const urlSet = new Map(); // url -> count
             let largestFolder = { title: '-', count: 0 };
 
-            function traverse(nodes, depth) {
+            function traverse(nodes, depth, parentId = null) {
               nodes.forEach(node => {
-                if (node.url) {
+                const title = typeof node.title === 'string' ? node.title.trim() : '';
+                const isBookmark = Boolean(node.url);
+
+                if (!title && node.id !== '0') {
+                  untitledItems++;
+                }
+
+                if (isBookmark) {
                   totalBookmarks++;
+                  if (parentId === '0' || parentId === '1' || parentId === '2') {
+                    rootLevelBookmarks++;
+                  }
                   // 域名统计
                   try {
-                    const hostname = new URL(node.url).hostname;
+                    const parsedUrl = new URL(node.url);
+                    const hostname = parsedUrl.hostname;
                     if (hostname) {
                       domainMap.set(hostname, (domainMap.get(hostname) || 0) + 1);
                     }
+                    if (parsedUrl.protocol === 'https:') httpsCount++;
+                    else if (parsedUrl.protocol === 'http:') httpCount++;
+                    else otherProtocolCount++;
                   } catch (_) { /* 忽略非法 URL */ }
                   // 重复 URL 统计
                   const u = node.url.trim();
@@ -2389,21 +2566,64 @@ document.addEventListener('DOMContentLoaded', function () {
                   if (directChildren > largestFolder.count && node.id !== '0') {
                     largestFolder = { title: node.title || t('common.untitled', null, 'Untitled'), count: directChildren };
                   }
-                  traverse(node.children, depth + 1);
+                  traverse(node.children, depth + 1, node.id);
                 }
               });
             }
-            traverse(tree, 1);
+            traverse(tree, 1, null);
 
             // 重复链接数
             let duplicateCount = 0;
             urlSet.forEach((count) => { if (count > 1) duplicateCount++; });
+
+            const uniqueDomains = domainMap.size;
+            const uniqueUrls = urlSet.size;
+            const averageBookmarksPerFolder = totalFolders > 0 ? (totalBookmarks / totalFolders).toFixed(1) : '0.0';
+            const safeBookmarkCount = Math.max(totalBookmarks, 1);
 
             // 域名 Top 10
             const sortedDomains = [...domainMap.entries()]
               .sort((a, b) => b[1] - a[1])
               .slice(0, 10);
             const topCount = sortedDomains.length > 0 ? sortedDomains[0][1] : 1;
+
+            const linkDistributionRows = [
+              {
+                label: t('popup.tools.statsHttpsLinks', null, 'HTTPS Links'),
+                count: httpsCount,
+                toneClass: 'stats-health-good'
+              },
+              {
+                label: t('popup.tools.statsHttpLinks', null, 'HTTP Links'),
+                count: httpCount,
+                toneClass: httpCount > 0 ? 'stats-health-warning' : 'stats-health-good'
+              },
+              {
+                label: t('popup.tools.statsOtherProtocols', null, 'Other Protocols'),
+                count: otherProtocolCount,
+                toneClass: otherProtocolCount > 0 ? 'stats-health-primary' : 'stats-health-good'
+              },
+              {
+                label: t('popup.tools.statsRootLevelBookmarks', null, 'Root-Level Bookmarks'),
+                count: rootLevelBookmarks,
+                toneClass: rootLevelBookmarks > 0 ? 'stats-health-warning' : 'stats-health-good'
+              }
+            ].map(({ label, count, toneClass }) => {
+              const percent = Math.round((count / safeBookmarkCount) * 100);
+              const valueText = count > 0
+                ? t('popup.tools.statsCountWithPercent', { count, percent }, `${count} items (${percent}%)`)
+                : t('popup.tools.statsNone', null, 'None');
+              return `
+                <div class="stats-health-row">
+                  <span class="stats-health-label">${escapeHtml(label)}</span>
+                  <span class="stats-health-value ${toneClass}">${escapeHtml(valueText)}</span>
+                </div>
+              `;
+            }).join('');
+
+            const largestFolderText = largestFolder.count > 0
+              ? `${escapeHtml(largestFolder.title)} (${escapeHtml(t('popup.tools.statsItems', { count: largestFolder.count }, `${largestFolder.count} items`))})`
+              : escapeHtml(t('popup.tools.statsNone', null, 'None'));
 
             let domainHtml = '';
             sortedDomains.forEach(([domain, count], idx) => {
@@ -2433,6 +2653,14 @@ document.addEventListener('DOMContentLoaded', function () {
                   <div class="stat-label">${escapeHtml(t('popup.tools.statsTotalFolders', null, 'Folders'))}</div>
                 </div>
                 <div class="stat-card stat-card-compact">
+                  <div class="stat-value stat-value-medium">${uniqueDomains}</div>
+                  <div class="stat-label">${escapeHtml(t('popup.tools.statsUniqueDomains', null, 'Unique Domains'))}</div>
+                </div>
+                <div class="stat-card stat-card-compact">
+                  <div class="stat-value stat-value-medium">${uniqueUrls}</div>
+                  <div class="stat-label">${escapeHtml(t('popup.tools.statsUniqueUrls', null, 'Unique URLs'))}</div>
+                </div>
+                <div class="stat-card stat-card-compact">
                   <div class="stat-value stat-value-medium">${maxDepth}</div>
                   <div class="stat-label">${escapeHtml(t('popup.tools.statsMaxDepth', null, 'Max Depth'))}</div>
                 </div>
@@ -2450,6 +2678,13 @@ document.addEventListener('DOMContentLoaded', function () {
               </div>
 
               <div class="stats-section">
+                <div class="stats-section-title">${escapeHtml(t('popup.tools.statsLinkDistribution', null, 'Link Distribution'))}</div>
+                <div class="stats-section-panel stats-health-list">
+                  ${linkDistributionRows}
+                </div>
+              </div>
+
+              <div class="stats-section">
                 <div class="stats-section-title">${escapeHtml(t('popup.tools.statsStructureHealth', null, 'Structure Health'))}</div>
                 <div class="stats-section-panel stats-health-list">
                   <div class="stats-health-row">
@@ -2461,8 +2696,16 @@ document.addEventListener('DOMContentLoaded', function () {
                     <span class="stats-health-value ${emptyFolders > 0 ? 'stats-health-warning' : 'stats-health-good'}">${emptyFolders > 0 ? escapeHtml(t('popup.tools.statsItems', { count: emptyFolders }, `${emptyFolders} items`)) : escapeHtml(t('popup.tools.statsNone', null, 'None'))}</span>
                   </div>
                   <div class="stats-health-row">
+                    <span class="stats-health-label">${escapeHtml(t('popup.tools.statsUntitledItems', null, 'Untitled Items'))}</span>
+                    <span class="stats-health-value ${untitledItems > 0 ? 'stats-health-warning' : 'stats-health-good'}">${untitledItems > 0 ? escapeHtml(t('popup.tools.statsItems', { count: untitledItems }, `${untitledItems} items`)) : escapeHtml(t('popup.tools.statsNone', null, 'None'))}</span>
+                  </div>
+                  <div class="stats-health-row">
+                    <span class="stats-health-label">${escapeHtml(t('popup.tools.statsAvgPerFolder', null, 'Avg Bookmarks per Folder'))}</span>
+                    <span class="stats-health-value stats-health-primary">${escapeHtml(t('popup.tools.statsAvgValue', { value: averageBookmarksPerFolder }, `${averageBookmarksPerFolder} / folder`))}</span>
+                  </div>
+                  <div class="stats-health-row">
                     <span class="stats-health-label">${escapeHtml(t('popup.tools.statsLargestFolder', null, 'Largest Folder'))}</span>
-                    <span class="stats-health-value stats-health-primary">${escapeHtml(largestFolder.title)} (${escapeHtml(t('popup.tools.statsItems', { count: largestFolder.count }, `${largestFolder.count} items`))})</span>
+                    <span class="stats-health-value stats-health-primary">${largestFolderText}</span>
                   </div>
                 </div>
               </div>
@@ -2663,8 +2906,10 @@ document.addEventListener('DOMContentLoaded', function () {
                 button: cleanButton,
                 ids: Array.from(checkboxes).map((cb) => cb.getAttribute('data-id')),
                 removeFn: removeBookmarkAsync,
-                rescanButtonId: 'btnStartCheckBroken',
-                idleText: t('popup.tools.brokenClean', null, 'Delete Selected')
+                idleText: t('popup.tools.brokenClean', null, 'Delete Selected'),
+                afterSuccess: async ({ successIds }) => {
+                  updateBrokenCleanupView(successIds, t('popup.tools.brokenClean', null, 'Delete Selected'));
+                }
               });
             });
           });
@@ -2753,8 +2998,10 @@ document.addEventListener('DOMContentLoaded', function () {
                 button: cleanButton,
                 ids: Array.from(checkboxes).map((cb) => cb.getAttribute('data-id')),
                 removeFn: removeBookmarkTreeAsync,
-                rescanButtonId: 'btnStartCleanEmpty',
-                idleText: t('popup.tools.emptyFoldersClean', null, 'Delete Selected')
+                idleText: t('popup.tools.emptyFoldersClean', null, 'Delete Selected'),
+                afterSuccess: async ({ successIds }) => {
+                  updateEmptyFolderCleanupView(successIds, t('popup.tools.emptyFoldersClean', null, 'Delete Selected'));
+                }
               });
             });
           });

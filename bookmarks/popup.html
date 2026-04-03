@@ -273,8 +273,13 @@
   </div>
 
   <!-- 全局 Toast 提示 -->
-  <div id="toast" class="toast">
-    <span id="toastMsg"></span>
+  <div id="toast" class="toast toast-info" role="status" aria-live="polite">
+    <div class="toast-indicator" aria-hidden="true">
+      <span id="toastIcon" class="toast-icon">i</span>
+    </div>
+    <div class="toast-body">
+      <span id="toastMsg" class="toast-message"></span>
+    </div>
     <button id="toastAction" class="toast-action is-hidden" data-i18n="common.undo">撤销</button>
   </div>
 

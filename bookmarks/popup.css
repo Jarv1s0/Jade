@@ -13,6 +13,7 @@
 	  --tool-item-icon-hover-bg: rgba(0, 102, 255, 0.3);
 	  --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.05);
 	  --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.08);
+	  --shadow-toast: 0 18px 40px rgba(15, 23, 42, 0.18);
 	  --radius-sm: 6px;
 	  --radius-md: 10px;
 	  --radius-lg: 14px;
@@ -47,6 +48,7 @@
 	    --tool-item-icon-hover-bg: rgba(10, 132, 255, 0.42);
 	    --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.2);
 	    --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.4);
+	    --shadow-toast: 0 20px 42px rgba(0, 0, 0, 0.38);
 	  }
 	}
 
@@ -63,6 +65,7 @@
 	  --tool-item-icon-hover-bg: rgba(10, 132, 255, 0.42);
 	  --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.2);
 	  --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.4);
+	  --shadow-toast: 0 20px 42px rgba(0, 0, 0, 0.38);
 	}
 
 	html {
@@ -1395,7 +1398,8 @@
 	.stats-health-row {
 	  display: flex;
 	  justify-content: space-between;
-	  align-items: center;
+	  align-items: flex-start;
+	  gap: 12px;
 	  font-size: 13px;
 	}
 
@@ -1405,6 +1409,8 @@
 
 	.stats-health-value {
 	  font-weight: 500;
+	  text-align: right;
+	  word-break: break-word;
 	}
 
 	.stats-health-good {
@@ -1418,6 +1424,7 @@
 	.stats-health-primary {
 	  color: var(--text-primary);
 	}
+
 
 	/* 右键菜单 */
 	.context-menu {
@@ -1485,14 +1492,18 @@
 	/* Toast 提示 */
 	.toast {
 	  position: fixed;
-	  top: 24px;
+	  bottom: 18px;
 	  left: 50%;
-	  transform: translateX(-50%) translateY(-150%);
-	  background: rgba(0, 0, 0, 0.8);
-	  color: #fff;
-	  padding: 10px 16px;
-	  border-radius: var(--radius-md);
-	  box-shadow: var(--shadow-md);
+	  width: min(344px, calc(100vw - 28px));
+	  transform: translateX(-50%) translateY(140%);
+	  background: rgba(255, 255, 255, 0.94);
+	  color: var(--text-primary);
+	  padding: 10px 12px;
+	  border: 1px solid rgba(15, 23, 42, 0.08);
+	  border-radius: 16px;
+	  box-shadow: var(--shadow-toast);
+	  backdrop-filter: blur(14px);
+	  -webkit-backdrop-filter: blur(14px);
 	  font-size: 13px;
 	  z-index: 3000;
 	  display: flex;
@@ -1500,7 +1511,9 @@
 	  gap: 12px;
 	  opacity: 0;
 	  pointer-events: none;
-	  transition: all 0.3s cubic-bezier(0.2, 0, 0, 1);
+	  transition: transform 0.28s cubic-bezier(0.2, 0, 0, 1), opacity 0.22s ease;
+	  --toast-accent: var(--accent-color);
+	  --toast-accent-soft: rgba(0, 102, 255, 0.12);
 	}
 
 	.toast.show {
@@ -1509,18 +1522,87 @@
 	  pointer-events: auto;
 	}
 
+	:root[data-theme='dark'] .toast {
+	  background: rgba(28, 28, 30, 0.94);
+	  border-color: rgba(255, 255, 255, 0.08);
+	}
+
+	@media (prefers-color-scheme: dark) {
+	  :root:not([data-theme='light']) .toast {
+	    background: rgba(28, 28, 30, 0.94);
+	    border-color: rgba(255, 255, 255, 0.08);
+	  }
+	}
+
+	.toast-info {
+	  --toast-accent: var(--accent-color);
+	  --toast-accent-soft: rgba(0, 102, 255, 0.12);
+	}
+
+	.toast-success {
+	  --toast-accent: #16a34a;
+	  --toast-accent-soft: rgba(22, 163, 74, 0.14);
+	}
+
+	.toast-warning {
+	  --toast-accent: #d97706;
+	  --toast-accent-soft: rgba(217, 119, 6, 0.16);
+	}
+
+	.toast-error {
+	  --toast-accent: #dc2626;
+	  --toast-accent-soft: rgba(220, 38, 38, 0.14);
+	}
+
+	.toast-indicator {
+	  width: 30px;
+	  height: 30px;
+	  flex-shrink: 0;
+	  border-radius: 999px;
+	  display: flex;
+	  align-items: center;
+	  justify-content: center;
+	  background: var(--toast-accent-soft);
+	  color: var(--toast-accent);
+	}
+
+	.toast-icon {
+	  font-size: 15px;
+	  font-weight: 700;
+	  line-height: 1;
+	}
+
+	.toast-body {
+	  min-width: 0;
+	  flex: 1;
+	  display: flex;
+	  align-items: center;
+	}
+
+	.toast-message {
+	  display: block;
+	  line-height: 1.45;
+	  font-weight: 600;
+	  color: var(--text-primary);
+	  word-break: break-word;
+	}
+
 	.toast-action {
+	  border: 1px solid var(--toast-accent-soft);
 	  background: transparent;
-	  border: none;
-	  color: var(--accent-color);
-	  font-weight: 500;
+	  color: var(--toast-accent);
+	  font-weight: 600;
 	  cursor: pointer;
-	  padding: 0;
-	  font-size: 13px;
+	  padding: 6px 10px;
+	  font-size: 12px;
+	  border-radius: 999px;
+	  flex-shrink: 0;
+	  transition: background-color 0.15s ease, border-color 0.15s ease, transform 0.15s ease;
 	}
 
 	.toast-action:hover {
-	  text-decoration: underline;
+	  background: var(--toast-accent-soft);
+	  transform: translateY(-1px);
 	}
 
 	/* 空状态说明 */
