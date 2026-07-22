@@ -64,6 +64,34 @@ function Get-ZipEntries {
     }
 }
 
+function Copy-PackageItem {
+    param(
+        [string]$SourcePath,
+        [string]$DestinationPath
+    )
+
+    if (Test-Path -LiteralPath $SourcePath -PathType Container) {
+        Get-ChildItem -Path $SourcePath -Recurse -File |
+            Where-Object { $_.Extension -ne '.zip' } |
+            ForEach-Object {
+                $relativePath = [System.IO.Path]::GetRelativePath($SourcePath, $_.FullName)
+                $targetPath = Join-Path $DestinationPath $relativePath
+                $targetDir = Split-Path -Parent $targetPath
+                if (-not (Test-Path -LiteralPath $targetDir)) {
+                    New-Item -ItemType Directory -Path $targetDir -Force | Out-Null
+                }
+                Copy-Item -LiteralPath $_.FullName -Destination $targetPath -Force
+            }
+        return
+    }
+
+    $targetDir = Split-Path -Parent $DestinationPath
+    if (-not (Test-Path -LiteralPath $targetDir)) {
+        New-Item -ItemType Directory -Path $targetDir -Force | Out-Null
+    }
+    Copy-Item -LiteralPath $SourcePath -Destination $DestinationPath -Force
+}
+
 $releaseRoot = $PSScriptRoot
 $projectRoot = Split-Path -Parent $releaseRoot
 $manifestPath = Join-Path $projectRoot 'manifest.json'
@@ -86,6 +114,7 @@ if ([string]::IsNullOrWhiteSpace($OutputName)) {
 
 $outputPath = Join-Path $releaseRoot $OutputName
 $cleanupScriptPath = Join-Path $releaseRoot 'clean-release.ps1'
+$stagingRoot = Join-Path $releaseRoot '.package-staging'
 
 $packageItems = @(
     'manifest.json',
@@ -143,12 +172,24 @@ if (Test-Path -LiteralPath $outputPath) {
     Remove-Item -LiteralPath $outputPath -Force
 }
 
-Push-Location $projectRoot
+if (Test-Path -LiteralPath $stagingRoot) {
+    Remove-Item -LiteralPath $stagingRoot -Recurse -Force
+}
+
+New-Item -ItemType Directory -Path $stagingRoot -Force | Out-Null
+foreach ($item in $packageItems) {
+    Copy-PackageItem -SourcePath (Join-Path $projectRoot $item) -DestinationPath (Join-Path $stagingRoot $item)
+}
+
+Push-Location $stagingRoot
 try {
     Compress-Archive -Path $packageItems -DestinationPath $outputPath -Force
 }
 finally {
     Pop-Location
+    if (Test-Path -LiteralPath $stagingRoot) {
+        Remove-Item -LiteralPath $stagingRoot -Recurse -Force
+    }
 }
 
 $zipEntries = Get-ZipEntries -ZipPath $outputPath

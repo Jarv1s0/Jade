@@ -22,9 +22,9 @@
         : t('popup.contextMenu.addToPinned', null, 'Add to Pinned'),
       showSortName: isFolder && !isRecent,
       showSortTime: isFolder && !isRecent,
+      showMove: !!(args.targetNodeId && !isFolder && !isRecent && !isFrequent),
       showEdit: (args.targetNodeId || isFrequent) && !isRecent,
       showDelete: !!(args.targetNodeId && !isRecent),
-      showAddToGroup: isRecent,
       showRemoveRecent: isRecent,
       showDivider: !isRecent
     };
@@ -32,7 +32,7 @@
 
   function resolvePosition(args) {
     const menuWidth = 140;
-    const menuHeight = args.isFolder ? 160 : (args.isFrequent ? 120 : 100);
+    const menuHeight = args.isFolder ? 160 : (args.isFrequent ? 120 : 150);
     let x = args.clientX;
     let y = args.clientY;
     if (x + menuWidth > args.bodyWidth) x -= menuWidth;

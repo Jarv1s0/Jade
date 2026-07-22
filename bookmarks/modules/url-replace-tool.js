@@ -14,11 +14,71 @@
     });
   }
 
+  function updateBookmarkUrlIfCurrentAsync(chromeApi, bookmarkId, expectedUrl, newUrl) {
+    return new Promise((resolve, reject) => {
+      chromeApi.bookmarks.get(bookmarkId, (nodes) => {
+        const runtimeError = chromeApi.runtime && chromeApi.runtime.lastError;
+        if (runtimeError) {
+          reject(new Error(runtimeError.message || 'Unknown bookmark error'));
+          return;
+        }
+
+        const node = Array.isArray(nodes) ? nodes[0] : null;
+        if (!node) {
+          reject(new Error('Bookmark no longer exists'));
+          return;
+        }
+        if (node.url !== expectedUrl) {
+          reject(new Error('Bookmark URL changed after preview'));
+          return;
+        }
+
+        updateBookmarkUrlAsync(chromeApi, bookmarkId, newUrl).then(resolve, reject);
+      });
+    });
+  }
+
   function getFailureReason(error) {
     if (error && typeof error === 'object' && typeof error.message === 'string' && error.message) {
       return error.message;
     }
     return String(error || 'Unknown reason');
+  }
+
+  function compileUrlReplacePattern(rawPattern) {
+    const source = String(rawPattern || '');
+    if (!source) {
+      throw new Error('Empty pattern');
+    }
+
+    if (source.startsWith('/')) {
+      const lastSlashIndex = source.lastIndexOf('/');
+      if (lastSlashIndex > 0) {
+        const patternBody = source.slice(1, lastSlashIndex);
+        let flags = source.slice(lastSlashIndex + 1);
+        if (!flags.includes('g')) flags += 'g';
+        return new RegExp(patternBody, flags);
+      }
+    }
+
+    return new RegExp(source, 'g');
+  }
+
+  function createUrlReplacementRule(rawPattern, replacement) {
+    const regex = compileUrlReplacePattern(rawPattern);
+    const replacementText = String(replacement || '');
+
+    return {
+      apply(url) {
+        const value = String(url || '');
+        regex.lastIndex = 0;
+        if (!regex.test(value)) return null;
+        regex.lastIndex = 0;
+
+        const nextValue = value.replace(regex, replacementText);
+        return nextValue === value ? null : nextValue;
+      }
+    };
   }
 
   function bindUrlReplaceTool(deps) {
@@ -50,7 +110,7 @@
       toolsResultList.innerHTML = `
         <div id="urlReplaceRuleArea" class="url-replace-rule-area">
           <div class="url-replace-title">${escapeHtml(t('popup.tools.batchReplaceRuleTitle', null, 'Find and Replace Rule'))}</div>
-          <input type="text" id="urlFindTarget" placeholder="${escapeHtmlAttr(t('popup.tools.batchReplaceFindPlaceholder', null, 'Find text (for example: old-domain.com)'))}" class="search-input url-replace-input" spellcheck="false" autocomplete="off">
+          <input type="text" id="urlFindTarget" placeholder="${escapeHtmlAttr(t('popup.tools.batchReplaceFindPlaceholder', null, 'Regex pattern (for example: old-domain\\.com or /old/i)'))}" class="search-input url-replace-input" spellcheck="false" autocomplete="off">
           <input type="text" id="urlReplaceTarget" placeholder="${escapeHtmlAttr(t('popup.tools.batchReplaceReplacePlaceholder', null, 'Replace with (leave empty to remove matches)'))}" class="search-input url-replace-input" spellcheck="false" autocomplete="off">
           <div class="url-replace-scope">${escapeHtml(t('popup.tools.batchReplaceScope', null, 'Scope: all bookmark URLs'))}</div>
           <button id="btnStartUrlPreview" class="tool-btn tool-btn-primary url-replace-preview-btn" disabled>${escapeHtml(t('popup.tools.batchReplacePreview', null, 'Preview Changes'))}</button>
@@ -68,7 +128,7 @@
       `;
 
       toolDetailWarning.style.display = 'block';
-      toolDetailWarning.innerHTML = t('popup.tools.batchReplaceWarning', null, '⚠️ <strong>Risk:</strong> replacement cannot be undone. Preview the results carefully first.');
+      toolDetailWarning.innerHTML = t('popup.tools.batchReplaceWarning', null, '⚠️ <strong>Risk:</strong> replacement cannot be undone. Preview the results carefully before applying changes.');
 
       const ruleArea = document.getElementById('urlReplaceRuleArea');
       const findInput = document.getElementById('urlFindTarget');
@@ -82,11 +142,11 @@
         if (findInput.value.trim().length > 0) {
           previewBtn.disabled = false;
           statusText.style.color = 'var(--text-secondary)';
-          statusText.innerHTML = t('popup.tools.batchReplaceReadyHint', null, 'A find rule is ready. Click "Preview Changes" to inspect replacements.');
+          statusText.textContent = t('popup.tools.batchReplaceReadyHint', null, 'A regex rule is ready. Click "Preview Changes" to inspect replacements.');
         } else {
           previewBtn.disabled = true;
           statusText.style.color = 'var(--text-secondary)';
-          statusText.innerHTML = t('popup.tools.batchReplaceHint', null, 'Enter find and replace text above, then click "Preview Changes".');
+          statusText.textContent = t('popup.tools.batchReplaceHint', null, 'Enter a regex pattern and replacement text, then click "Preview Changes".');
         }
       });
 
@@ -95,12 +155,25 @@
         const replaceStr = replaceInput.value;
         if (!findStr) return;
 
+        let replacementRule = null;
+        try {
+          replacementRule = createUrlReplacementRule(findStr, replaceStr);
+        } catch (error) {
+          statusArea.style.color = '#ff3b30';
+          statusText.textContent = t(
+            'popup.tools.batchReplaceInvalidRegex',
+            { reason: getFailureReason(error) },
+            `Invalid regular expression: ${getFailureReason(error)}`
+          );
+          return;
+        }
+
         findInput.disabled = true;
         replaceInput.disabled = true;
         previewBtn.disabled = true;
         previewBtn.textContent = t('popup.tools.batchReplaceScanning', null, 'Scanning...');
         statusArea.style.color = 'var(--text-secondary)';
-        statusArea.innerHTML = t('popup.tools.batchReplacePreviewing', null, '<div class="url-inline-spinner">Previewing...</div>');
+        statusText.innerHTML = t('popup.tools.batchReplacePreviewing', null, '<div class="url-inline-spinner">Previewing...</div>');
         previewArea.style.display = 'none';
         toolDetailFooter.style.display = 'none';
 
@@ -109,11 +182,12 @@
             const matches = [];
             function traverse(nodes) {
               nodes.forEach((node) => {
-                if (node.url && node.url.includes(findStr)) {
+                const newUrl = node.url ? replacementRule.apply(node.url) : null;
+                if (newUrl) {
                   matches.push({
                     node,
                     oldUrl: node.url,
-                    newUrl: node.url.split(findStr).join(replaceStr)
+                    newUrl
                   });
                 }
                 if (node.children) traverse(node.children);
@@ -127,7 +201,7 @@
               previewBtn.disabled = false;
               previewBtn.textContent = t('popup.tools.batchReplacePreview', null, 'Preview Changes');
               statusArea.style.color = 'var(--text-secondary)';
-              statusArea.innerHTML = t('popup.tools.batchReplaceNone', null, 'No replaceable URLs found');
+              statusText.textContent = t('popup.tools.batchReplaceNone', null, 'No replaceable URLs found');
               return;
             }
 
@@ -179,7 +253,7 @@
                 previewBtn.disabled = false;
                 previewBtn.textContent = t('popup.tools.batchReplaceRepreview', null, 'Preview Again');
                 statusArea.style.display = 'flex';
-                statusText.innerHTML = t('popup.tools.batchReplaceBackToEdit', null, 'Returned to edit mode. Adjust the rule and preview again.');
+                statusText.textContent = t('popup.tools.batchReplaceBackToEdit', null, 'Returned to edit mode. Adjust the rule and preview again.');
                 previewArea.style.display = 'none';
                 toolDetailFooter.style.display = 'none';
               });
@@ -209,7 +283,12 @@
               };
 
               const results = await Promise.allSettled(
-                matches.map((item) => updateBookmarkUrlAsync(chromeApi, item.node.id, item.newUrl))
+                matches.map((item) => updateBookmarkUrlIfCurrentAsync(
+                  chromeApi,
+                  item.node.id,
+                  item.node.url,
+                  item.newUrl
+                ))
               );
               const failed = results.filter((result) => result.status === 'rejected');
               const successCount = results.length - failed.length;
@@ -256,6 +335,9 @@
 
   global.JadeModules = global.JadeModules || {};
   global.JadeModules.urlReplaceTool = {
-    bindUrlReplaceTool
+    bindUrlReplaceTool,
+    compileUrlReplacePattern,
+    createUrlReplacementRule,
+    updateBookmarkUrlIfCurrentAsync
   };
 })(window);

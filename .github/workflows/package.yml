@@ -1,48 +1,67 @@
 name: Package Extension
 
 on:
+  push:
+    branches:
+      - main
+  pull_request:
   workflow_dispatch:
-    inputs:
-      version:
-        description: '版本号 (例如: 1.0.1)'
-        required: true
-        default: '1.0.0'
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  package:
+  verify:
     runs-on: ubuntu-latest
     steps:
       - name: 检出代码
         uses: actions/checkout@v4
 
-      - name: 打包扩展程序
-        id: pack
+      - name: 设置 Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: 运行验证
+        run: npm run verify
+
+  package:
+    if: github.event_name == 'workflow_dispatch'
+    needs: verify
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 设置 Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: 读取扩展版本
+        id: version
+        shell: pwsh
         run: |
-          VERSION="${{ github.event.inputs.version }}"
-          ZIP_NAME="Jade-v${VERSION}.zip"
-          # 仅将必要的文件和文件夹打包到 zip 中
-          # 排除 .git, .github, .gitignore 等开发环境文件
-          zip -r "$ZIP_NAME" \
-            manifest.json \
-            _locales/ \
-            bookmarks/ \
-            newtab/ \
-            shared/ \
-            privacy.html \
-            README.md
-          
-          echo "zip_name=$ZIP_NAME" >> $GITHUB_OUTPUT
-          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          $manifest = Get-Content -LiteralPath manifest.json -Raw | ConvertFrom-Json
+          $version = [string]$manifest.version
+          if ([string]::IsNullOrWhiteSpace($version)) {
+            throw 'manifest.json version is empty'
+          }
+          "version=$version" >> $env:GITHUB_OUTPUT
+          "zip_name=release/Jade-v$version.zip" >> $env:GITHUB_OUTPUT
+
+      - name: 打包扩展程序
+        shell: pwsh
+        run: ./release/build.ps1 -KeepLatest 0
 
       - name: 创建 Release 并上传 ZIP
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v${{ github.event.inputs.version }}
-          name: Jade ${{ github.event.inputs.version }}
-          files: ${{ steps.pack.outputs.zip_name }}
+          tag_name: v${{ steps.version.outputs.version }}
+          name: Jade ${{ steps.version.outputs.version }}
+          files: ${{ steps.version.outputs.zip_name }}
           draft: false
           prerelease: false
         env:

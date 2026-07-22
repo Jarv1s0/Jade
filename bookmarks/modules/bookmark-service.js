@@ -9,26 +9,45 @@
   );
 
   function createTreeCache(chromeApi) {
-    const cache = { data: null, inFlight: null };
+    const cache = { data: null, inFlight: null, generation: 0 };
 
     function invalidate() {
       cache.data = null;
+      cache.inFlight = null;
+      cache.generation++;
     }
 
-    function setupInvalidation() {
-      const invalidateFn = () => invalidate();
-      const events = [
+    function setupInvalidation(onInvalidated) {
+      let importInProgress = false;
+      const notifyInvalidated = () => {
+        invalidate();
+        if (!importInProgress && typeof onInvalidated === 'function') {
+          onInvalidated();
+        }
+      };
+      const mutationEvents = [
         chromeApi.bookmarks.onCreated,
         chromeApi.bookmarks.onRemoved,
         chromeApi.bookmarks.onChanged,
         chromeApi.bookmarks.onMoved,
-        chromeApi.bookmarks.onChildrenReordered,
-        chromeApi.bookmarks.onImportBegan,
-        chromeApi.bookmarks.onImportEnded
+        chromeApi.bookmarks.onChildrenReordered
       ];
-      events.forEach((eventObj) => {
-        if (eventObj && eventObj.addListener) eventObj.addListener(invalidateFn);
+      mutationEvents.forEach((eventObj) => {
+        if (eventObj && eventObj.addListener) eventObj.addListener(notifyInvalidated);
       });
+
+      if (chromeApi.bookmarks.onImportBegan && chromeApi.bookmarks.onImportBegan.addListener) {
+        chromeApi.bookmarks.onImportBegan.addListener(() => {
+          importInProgress = true;
+          invalidate();
+        });
+      }
+      if (chromeApi.bookmarks.onImportEnded && chromeApi.bookmarks.onImportEnded.addListener) {
+        chromeApi.bookmarks.onImportEnded.addListener(() => {
+          importInProgress = false;
+          notifyInvalidated();
+        });
+      }
     }
 
     function getTreeCached(callback, options) {
@@ -46,26 +65,35 @@
       }
 
       if (!forceRefresh && cache.inFlight) {
-        cache.inFlight.then(runCallback);
+        cache.inFlight.then((tree) => {
+          if (tree !== null) runCallback(tree);
+        });
         return;
       }
 
+      const requestGeneration = cache.generation;
       const request = new Promise((resolve) => {
         chromeApi.bookmarks.getTree((tree) => {
           if (chromeApi.runtime && chromeApi.runtime.lastError) {
             resolve([]);
             return;
           }
-          cache.data = tree;
           resolve(tree);
         });
       });
 
-      cache.inFlight = request.finally(() => {
-        if (cache.inFlight === request) cache.inFlight = null;
+      const currentRequest = request.then((tree) => {
+        if (requestGeneration !== cache.generation) return null;
+        cache.data = tree;
+        return tree;
+      }).finally(() => {
+        if (cache.inFlight === currentRequest) cache.inFlight = null;
       });
+      cache.inFlight = currentRequest;
 
-      request.then(runCallback);
+      currentRequest.then((tree) => {
+        if (tree !== null) runCallback(tree);
+      });
     }
 
     return {
@@ -157,6 +185,33 @@
     return count;
   }
 
+  function collectBookmarkFolders(tree) {
+    const folders = [];
+
+    function walk(nodes, parentTitles = [], depth = 0) {
+      (Array.isArray(nodes) ? nodes : []).forEach((node) => {
+        if (!node || node.url) return;
+
+        const isRoot = node.id === '0';
+        const title = String(node.title || '').trim() || t('common.untitledFolder', null, 'Untitled folder');
+        const pathTitles = isRoot ? parentTitles : parentTitles.concat(title);
+        if (!isRoot) {
+          folders.push({
+            id: String(node.id),
+            title,
+            path: pathTitles.join(' / '),
+            depth
+          });
+        }
+
+        walk(node.children, pathTitles, isRoot ? depth : depth + 1);
+      });
+    }
+
+    walk(tree);
+    return folders;
+  }
+
   function createBookmarkAsync(chromeApi, payload) {
     return new Promise((resolve, reject) => {
       chromeApi.bookmarks.create(payload, (created) => {
@@ -227,6 +282,7 @@
     readFileAsText,
     parseImportedHtmlBookmarks,
     countImportableNodes,
+    collectBookmarkFolders,
     createBookmarkAsync,
     getImportParentId,
     importNodesRecursive

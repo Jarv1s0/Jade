@@ -185,14 +185,13 @@
       },
 
       async nasa(forceRefresh = false) {
-        if (forceRefresh) {
-          state.nasaDateOffset++;
-        }
+        const baseOffset = state.nasaDateOffset + (forceRefresh ? 1 : 0);
 
         const maxSkip = 10;
         for (let skip = 0; skip < maxSkip; skip++) {
+          const candidateOffset = baseOffset + skip;
           const targetDate = new Date();
-          targetDate.setDate(targetDate.getDate() - state.nasaDateOffset - skip);
+          targetDate.setDate(targetDate.getDate() - candidateOffset);
           const year = targetDate.getFullYear();
           const month = String(targetDate.getMonth() + 1).padStart(2, '0');
           const day = String(targetDate.getDate()).padStart(2, '0');
@@ -204,15 +203,15 @@
 
           if (!response.ok) {
             if (response.status === 429) throw new Error('NASA Rate Limit Exceeded');
-            state.nasaDateOffset++;
             continue;
           }
 
           const payload = await response.json();
           if (payload.media_type !== 'image') {
-            state.nasaDateOffset++;
             continue;
           }
+
+          state.nasaDateOffset = candidateOffset;
 
           let finalTitle = payload.title || '';
           let finalDetail = payload.explanation || '';

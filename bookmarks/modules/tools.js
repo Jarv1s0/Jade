@@ -43,6 +43,148 @@
     return links;
   }
 
+  function collectDuplicateUrlGroups(tree) {
+    const urlMap = new Map();
+
+    const walk = (nodes) => {
+      (nodes || []).forEach((node) => {
+        if (node && node.url) {
+          const url = String(node.url || '').trim();
+          if (url) {
+            if (!urlMap.has(url)) urlMap.set(url, []);
+            urlMap.get(url).push(node);
+          }
+        }
+        if (node && Array.isArray(node.children) && node.children.length > 0) {
+          walk(node.children);
+        }
+      });
+    };
+
+    walk(Array.isArray(tree) ? tree : []);
+
+    const duplicateGroups = [];
+    urlMap.forEach((nodes, url) => {
+      if (nodes.length > 1) duplicateGroups.push({ url, nodes });
+    });
+    return duplicateGroups;
+  }
+
+  function collectLeafEmptyFolders(tree, options = {}) {
+    const excludedIds = new Set(options.excludedIds || ['0', '1', '2']);
+    const emptyFolders = [];
+
+    const walk = (nodes) => {
+      (nodes || []).forEach((node) => {
+        if (!node || node.url) return;
+
+        const children = Array.isArray(node.children) ? node.children : [];
+        const isExcluded = excludedIds.has(String(node.id));
+        if (!isExcluded && children.length === 0) {
+          emptyFolders.push(node);
+          return;
+        }
+
+        walk(children);
+      });
+    };
+
+    walk(Array.isArray(tree) ? tree : []);
+    return emptyFolders;
+  }
+
+  function analyzeBookmarkStats(tree) {
+    let totalBookmarks = 0;
+    let totalFolders = 0;
+    let maxDepth = 0;
+    let emptyFolders = 0;
+    let httpsCount = 0;
+    let httpCount = 0;
+    let otherProtocolCount = 0;
+    let untitledItems = 0;
+    let rootLevelBookmarks = 0;
+    let largestFolder = { title: '', count: 0 };
+    const domainMap = new Map();
+    const urlSet = new Map();
+
+    const walk = (nodes, depth, parentId = null) => {
+      (nodes || []).forEach((node) => {
+        if (!node) return;
+
+        const title = typeof node.title === 'string' ? node.title.trim() : '';
+        const isBookmark = Boolean(node.url);
+
+        if (!title && node.id !== '0') {
+          untitledItems++;
+        }
+
+        if (isBookmark) {
+          totalBookmarks++;
+          if (parentId === '0' || parentId === '1' || parentId === '2') {
+            rootLevelBookmarks++;
+          }
+
+          try {
+            const parsedUrl = new URL(node.url);
+            const hostname = parsedUrl.hostname;
+            if (hostname) {
+              domainMap.set(hostname, (domainMap.get(hostname) || 0) + 1);
+            }
+            if (parsedUrl.protocol === 'https:') httpsCount++;
+            else if (parsedUrl.protocol === 'http:') httpCount++;
+            else otherProtocolCount++;
+          } catch (_) {
+            // Ignore invalid bookmark URLs in protocol/domain stats.
+          }
+
+          const url = String(node.url || '').trim();
+          if (url) urlSet.set(url, (urlSet.get(url) || 0) + 1);
+          return;
+        }
+
+        const children = Array.isArray(node.children) ? node.children : null;
+        if (!children) return;
+
+        totalFolders++;
+        if (depth > maxDepth) maxDepth = depth;
+        if (children.length === 0 && node.id !== '0' && node.id !== '1' && node.id !== '2') {
+          emptyFolders++;
+        }
+        if (children.length > largestFolder.count && node.id !== '0') {
+          largestFolder = { title: node.title || '', count: children.length };
+        }
+        walk(children, depth + 1, node.id);
+      });
+    };
+
+    walk(Array.isArray(tree) ? tree : [], 1, null);
+
+    let duplicateCount = 0;
+    urlSet.forEach((count) => {
+      if (count > 1) duplicateCount++;
+    });
+
+    return {
+      totalBookmarks,
+      totalFolders,
+      maxDepth,
+      emptyFolders,
+      httpsCount,
+      httpCount,
+      otherProtocolCount,
+      untitledItems,
+      rootLevelBookmarks,
+      duplicateCount,
+      uniqueDomains: domainMap.size,
+      uniqueUrls: urlSet.size,
+      averageBookmarksPerFolder: totalFolders > 0 ? (totalBookmarks / totalFolders).toFixed(1) : '0.0',
+      topDomains: [...domainMap.entries()]
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, 10),
+      largestFolder
+    };
+  }
+
   async function fetchWithTimeout(fetchImpl, url, options, timeoutMs, scanSession) {
     const controller = new AbortController();
     if (scanSession && scanSession.controllers) {
@@ -289,6 +431,9 @@
     createScanSession,
     cancelScan,
     collectHttpLinks,
+    collectDuplicateUrlGroups,
+    collectLeafEmptyFolders,
+    analyzeBookmarkStats,
     createProbeLink,
     scanLinks,
     runBrokenLinkScan

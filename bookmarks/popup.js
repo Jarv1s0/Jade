@@ -50,9 +50,9 @@ document.addEventListener('DOMContentLoaded', function () {
   const menuPin = document.getElementById('menuPin');
   const menuSortName = document.getElementById('menuSortName');
   const menuSortTime = document.getElementById('menuSortTime');
+  const menuMove = document.getElementById('menuMove');
   const menuEdit = document.getElementById('menuEdit');
   const menuDelete = document.getElementById('menuDelete');
-  const menuAddToGroup = document.getElementById('menuAddToGroup');
   const menuRemoveRecent = document.getElementById('menuRemoveRecent');
   const menuDivider1 = document.getElementById('menuDivider1');
   const editModal = document.getElementById('editModal');
@@ -62,6 +62,11 @@ document.addEventListener('DOMContentLoaded', function () {
   const editUrlInput = document.getElementById('editUrlInput');
   const editSaveBtn = document.getElementById('editSaveBtn');
   const editCancelBtn = document.getElementById('editCancelBtn');
+  const moveModal = document.getElementById('moveModal');
+  const moveFolderSelect = document.getElementById('moveFolderSelect');
+  const moveFolderHint = document.getElementById('moveFolderHint');
+  const moveConfirmBtn = document.getElementById('moveConfirmBtn');
+  const moveCancelBtn = document.getElementById('moveCancelBtn');
   const confirmModal = document.getElementById('confirmModal');
   const confirmModalContent = confirmModal ? confirmModal.querySelector('.confirm-modal-content') : null;
   const confirmModalTitle = document.getElementById('confirmModalTitle');
@@ -80,12 +85,14 @@ document.addEventListener('DOMContentLoaded', function () {
   let currentFolderId = '1'; // Default: Bookmarks Bar
   let navigationStack = [];
   let isSearching = false;
+  let searchRequestToken = 0;
   let targetNodeId = null;
   let targetNodeIsFolder = false;
   let targetNodeDomain = null; // New for history items
   let targetNodePinKey = null;
   let targetFrequentKey = null;
   let targetFrequentUrl = null; // 常用卡片当前 URL
+  let movingBookmarkId = null;
   let pinnedIds = new Set();
   let frequentOrder = []; // 用户自定义的常用访问排序
   let frequentCustomTitles = {}; // 用户自定义的常用卡片显示名称
@@ -107,8 +114,10 @@ document.addEventListener('DOMContentLoaded', function () {
     : null;
   const bookmarkTreeCacheFallback = {
     data: null,
-    inFlight: null
+    inFlight: null,
+    generation: 0
   };
+  let bookmarkViewRefreshTimer = null;
   const PINNED_PREF_KEYS = ['pinned_bookmarks', 'frequent_order'];
   const CUSTOM_PREF_KEYS = ['frequent_custom_titles', 'frequent_custom_urls'];
   const preferenceStorageArea = chrome.storage.sync || chrome.storage.local;
@@ -390,6 +399,22 @@ document.addEventListener('DOMContentLoaded', function () {
     });
   }
 
+  function ensureBrokenLinkHostPermission() {
+    if (!chrome.permissions || typeof chrome.permissions.request !== 'function') {
+      return Promise.resolve(false);
+    }
+
+    return new Promise((resolve) => {
+      chrome.permissions.request({ origins: ['<all_urls>'] }, (granted) => {
+        if (chrome.runtime.lastError) {
+          resolve(false);
+          return;
+        }
+        resolve(!!granted);
+      });
+    });
+  }
+
   function updateTabAsync(tabId, updateProperties) {
     return new Promise((resolve, reject) => {
       chrome.tabs.update(tabId, updateProperties, (tab) => {
@@ -483,29 +508,54 @@ document.addEventListener('DOMContentLoaded', function () {
       return;
     }
     bookmarkTreeCacheFallback.data = null;
+    bookmarkTreeCacheFallback.inFlight = null;
+    bookmarkTreeCacheFallback.generation++;
   }
 
   function setupBookmarkCacheInvalidation() {
+    const scheduleViewRefresh = () => {
+      if (bookmarkViewRefreshTimer) clearTimeout(bookmarkViewRefreshTimer);
+      bookmarkViewRefreshTimer = setTimeout(() => {
+        bookmarkViewRefreshTimer = null;
+        refreshView();
+      }, 80);
+    };
+
     if (bookmarkTreeCacheManager) {
-      bookmarkTreeCacheManager.setupInvalidation();
+      bookmarkTreeCacheManager.setupInvalidation(scheduleViewRefresh);
       return;
     }
-    const invalidate = () => invalidateBookmarkTreeCache();
-    const events = [
+    let importInProgress = false;
+    const invalidateAndRefresh = () => {
+      invalidateBookmarkTreeCache();
+      if (!importInProgress) scheduleViewRefresh();
+    };
+    const mutationEvents = [
       chrome.bookmarks.onCreated,
       chrome.bookmarks.onRemoved,
       chrome.bookmarks.onChanged,
       chrome.bookmarks.onMoved,
-      chrome.bookmarks.onChildrenReordered,
-      chrome.bookmarks.onImportBegan,
-      chrome.bookmarks.onImportEnded
+      chrome.bookmarks.onChildrenReordered
     ];
 
-    events.forEach((eventObj) => {
+    mutationEvents.forEach((eventObj) => {
       if (eventObj && eventObj.addListener) {
-        eventObj.addListener(invalidate);
+        eventObj.addListener(invalidateAndRefresh);
       }
     });
+
+    if (chrome.bookmarks.onImportBegan && chrome.bookmarks.onImportBegan.addListener) {
+      chrome.bookmarks.onImportBegan.addListener(() => {
+        importInProgress = true;
+        invalidateBookmarkTreeCache();
+      });
+    }
+    if (chrome.bookmarks.onImportEnded && chrome.bookmarks.onImportEnded.addListener) {
+      chrome.bookmarks.onImportEnded.addListener(() => {
+        importInProgress = false;
+        invalidateAndRefresh();
+      });
+    }
   }
 
   function getBookmarkTreeCached(callback, options = {}) {
@@ -526,10 +576,13 @@ document.addEventListener('DOMContentLoaded', function () {
     }
 
     if (!forceRefresh && bookmarkTreeCacheFallback.inFlight) {
-      bookmarkTreeCacheFallback.inFlight.then(runCallback);
+      bookmarkTreeCacheFallback.inFlight.then((tree) => {
+        if (tree !== null) runCallback(tree);
+      });
       return;
     }
 
+    const requestGeneration = bookmarkTreeCacheFallback.generation;
     const request = new Promise((resolve) => {
       chrome.bookmarks.getTree((tree) => {
         if (chrome.runtime.lastError) {
@@ -537,18 +590,24 @@ document.addEventListener('DOMContentLoaded', function () {
           resolve([]);
           return;
         }
-        bookmarkTreeCacheFallback.data = tree;
         resolve(tree);
       });
     });
 
-    bookmarkTreeCacheFallback.inFlight = request.finally(() => {
-      if (bookmarkTreeCacheFallback.inFlight === request) {
+    const currentRequest = request.then((tree) => {
+      if (requestGeneration !== bookmarkTreeCacheFallback.generation) return null;
+      bookmarkTreeCacheFallback.data = tree;
+      return tree;
+    }).finally(() => {
+      if (bookmarkTreeCacheFallback.inFlight === currentRequest) {
         bookmarkTreeCacheFallback.inFlight = null;
       }
     });
+    bookmarkTreeCacheFallback.inFlight = currentRequest;
 
-    request.then(runCallback);
+    currentRequest.then((tree) => {
+      if (tree !== null) runCallback(tree);
+    });
   }
 
   // 借助 chrome.extension.getViews 探测侧边栏，这比 innerHeight 更可靠
@@ -879,8 +938,8 @@ document.addEventListener('DOMContentLoaded', function () {
           targetFrequentKey = item.pinKey || getItemPinKey(item);
           targetNodeDomain = domain;
           targetFrequentUrl = item.url || '';
-          targetNodeIsFolder = false;
-          showContextMenu(e, false, true);
+          targetNodeIsFolder = isFolder;
+          showContextMenu(e, isFolder, true);
         });
 
         frequentGrid.appendChild(a);
@@ -1130,7 +1189,7 @@ document.addEventListener('DOMContentLoaded', function () {
     };
 
     // Context menu
-    card.addEventListener('contextmenu', (e) => {
+    if (!folder.isUncategorized) card.addEventListener('contextmenu', (e) => {
       e.preventDefault();
       targetNodeId = folder.id;
       targetNodeIsFolder = true;
@@ -1199,7 +1258,7 @@ document.addEventListener('DOMContentLoaded', function () {
 
     if (isUncategorized) {
       getBookmarkTreeCached((tree) => {
-        const rootNodes = tree[0].children;
+        const rootNodes = tree && tree[0] && Array.isArray(tree[0].children) ? tree[0].children : [];
         const rootBookmarks = [];
         // 汇集所有的根目录直属书签
         rootNodes.forEach(rootNode => {
@@ -1218,6 +1277,13 @@ document.addEventListener('DOMContentLoaded', function () {
     }
 
     chrome.bookmarks.getChildren(id, (children) => {
+      if (chrome.runtime.lastError || !Array.isArray(children)) {
+        if (navigationStack.length > 1) navigationStack.pop();
+        const parent = navigationStack[navigationStack.length - 1];
+        if (!parent || navigationStack.length <= 1) buildDashboard();
+        else loadStandardFolder(parent.id, !!parent.isUncategorized);
+        return;
+      }
       renderStandardList(children);
       updateBreadcrumbUI();
     });
@@ -1262,7 +1328,7 @@ document.addEventListener('DOMContentLoaded', function () {
         chrome.bookmarks.move(draggedItemId, { parentId: parentNode.id }, () => {
           if (!chrome.runtime.lastError && currentFolderId) {
             invalidateBookmarkTreeCache();
-            loadStandardFolder(currentFolderId);
+            refreshView();
           }
         });
       });
@@ -1298,7 +1364,7 @@ document.addEventListener('DOMContentLoaded', function () {
           chrome.bookmarks.move(draggedItemId, { parentId: crumb.id }, () => {
             if (!chrome.runtime.lastError && currentFolderId) {
               invalidateBookmarkTreeCache();
-              loadStandardFolder(currentFolderId);
+              refreshView();
             }
           });
         });
@@ -1306,7 +1372,7 @@ document.addEventListener('DOMContentLoaded', function () {
 
       span.onclick = () => {
         navigationStack = navigationStack.slice(0, index + 2);
-        loadStandardFolder(crumb.id);
+        loadStandardFolder(crumb.id, !!crumb.isUncategorized);
       };
       breadcrumb.appendChild(span);
 
@@ -1327,6 +1393,7 @@ document.addEventListener('DOMContentLoaded', function () {
       return;
     }
 
+    const requestToken = ++searchRequestToken;
     isSearching = true;
     frequentSection.style.display = 'none';
     recentSection.style.display = 'none';
@@ -1337,19 +1404,23 @@ document.addEventListener('DOMContentLoaded', function () {
     updateBreadcrumbUI(query);
 
     Promise.all([
-      new Promise(resolve => chrome.bookmarks.search(query, resolve)),
+      new Promise(resolve => chrome.bookmarks.search(query, (results) => {
+        resolve(chrome.runtime.lastError || !Array.isArray(results) ? [] : results);
+      })),
       new Promise(resolve => {
         if (chrome.sessions && chrome.sessions.getRecentlyClosed) {
           chrome.sessions.getRecentlyClosed({ maxResults: 10 }, (sessions) => {
             if (chrome.runtime.lastError) { resolve([]); return; }
             const recentTabs = [];
-            sessions.forEach(session => {
-              if (session.tab && session.tab.title.toLowerCase().includes(query.toLowerCase())) {
-                recentTabs.push({ title: session.tab.title, url: session.tab.url, meta: t('popup.sessionsMeta', null, '[Recently Closed]') });
+            (Array.isArray(sessions) ? sessions : []).forEach(session => {
+              const tabTitle = String(session && session.tab && session.tab.title || '');
+              if (session.tab && tabTitle.toLowerCase().includes(query.toLowerCase())) {
+                recentTabs.push({ title: tabTitle || session.tab.url || '', url: session.tab.url, meta: t('popup.sessionsMeta', null, '[Recently Closed]') });
               } else if (session.window && session.window.tabs) {
                 session.window.tabs.forEach((tabItem) => {
-                  if (tabItem.title.toLowerCase().includes(query.toLowerCase())) {
-                    recentTabs.push({ title: tabItem.title, url: tabItem.url, meta: t('popup.sessionWindowMeta', null, '[Recently Closed Window]') });
+                  const itemTitle = String(tabItem && tabItem.title || '');
+                  if (itemTitle.toLowerCase().includes(query.toLowerCase())) {
+                    recentTabs.push({ title: itemTitle || tabItem.url || '', url: tabItem.url, meta: t('popup.sessionWindowMeta', null, '[Recently Closed Window]') });
                   }
                 });
               }
@@ -1361,17 +1432,20 @@ document.addEventListener('DOMContentLoaded', function () {
         }
       })
     ]).then(([bookmarksResults, sessionsResults]) => {
+      if (!isSearching || requestToken !== searchRequestToken || searchInput.value.trim() !== query) return;
       renderStandardList([...sessionsResults, ...bookmarksResults], true);
     });
   }
 
   function clearSearch() {
+    searchRequestToken++;
     searchInput.value = '';
     isSearching = false;
     if (navigationStack.length <= 1) {
       buildDashboard();
     } else {
-      loadStandardFolder(navigationStack[navigationStack.length - 1].id);
+      const currentNavigation = navigationStack[navigationStack.length - 1];
+      loadStandardFolder(currentNavigation.id, !!currentNavigation.isUncategorized);
     }
   }
 
@@ -1519,7 +1593,7 @@ document.addEventListener('DOMContentLoaded', function () {
             }, () => {
               if (!chrome.runtime.lastError && currentFolderId) {
                 invalidateBookmarkTreeCache();
-                loadStandardFolder(currentFolderId);
+                refreshView();
               }
             });
             return;
@@ -1536,7 +1610,7 @@ document.addEventListener('DOMContentLoaded', function () {
           }, () => {
             if (!chrome.runtime.lastError && currentFolderId) {
               invalidateBookmarkTreeCache();
-              loadStandardFolder(currentFolderId);
+              refreshView();
             }
           });
         });
@@ -2087,9 +2161,9 @@ document.addEventListener('DOMContentLoaded', function () {
           : t('popup.contextMenu.addToPinned', null, 'Add to Pinned'),
         showSortName: isFolder && !isRecent,
         showSortTime: isFolder && !isRecent,
+        showMove: !!(targetNodeId && !isFolder && !isRecent && !isFrequent),
         showEdit: (targetNodeId || isFrequent) && !isRecent,
         showDelete: !!(targetNodeId && !isRecent),
-        showAddToGroup: isRecent,
         showRemoveRecent: isRecent,
         showDivider: !isRecent
       };
@@ -2100,9 +2174,9 @@ document.addEventListener('DOMContentLoaded', function () {
     }
     if (menuSortName) menuSortName.style.display = visibility.showSortName ? 'block' : 'none';
     if (menuSortTime) menuSortTime.style.display = visibility.showSortTime ? 'block' : 'none';
+    if (menuMove) menuMove.style.display = visibility.showMove ? 'block' : 'none';
     if (menuEdit) menuEdit.style.display = visibility.showEdit ? 'block' : 'none';
     if (menuDelete) menuDelete.style.display = visibility.showDelete ? 'block' : 'none';
-    if (menuAddToGroup) menuAddToGroup.style.display = visibility.showAddToGroup ? 'block' : 'none';
     if (menuRemoveRecent) menuRemoveRecent.style.display = visibility.showRemoveRecent ? 'block' : 'none';
     if (menuDivider1) menuDivider1.style.display = visibility.showDivider ? 'block' : 'none';
 
@@ -2122,15 +2196,84 @@ document.addEventListener('DOMContentLoaded', function () {
     contextMenu.style.display = 'block';
   }
 
-  function setupContextMenuAndModals() {
-    if (menuAddToGroup) {
-      menuAddToGroup.addEventListener('click', () => {
-        // TODO: 接入项目已有的“添加到分组”能力。这里预留调用接口
-        showToast(t('popup.toasts.featureInProgress', null, 'In progress: add to group support'), { tone: 'warning' });
-        contextMenu.style.display = 'none';
-      });
+  function closeMoveModal() {
+    movingBookmarkId = null;
+    if (moveModal) moveModal.style.display = 'none';
+  }
+
+  function getAvailableBookmarkFolders(tree) {
+    if (bookmarkService && typeof bookmarkService.collectBookmarkFolders === 'function') {
+      return bookmarkService.collectBookmarkFolders(tree);
     }
 
+    const folders = [];
+    const walk = (nodes, parentTitles = [], depth = 0) => {
+      (Array.isArray(nodes) ? nodes : []).forEach((node) => {
+        if (!node || node.url) return;
+        const isRoot = node.id === '0';
+        const title = String(node.title || '').trim() || t('common.untitledFolder', null, 'Untitled folder');
+        const pathTitles = isRoot ? parentTitles : parentTitles.concat(title);
+        if (!isRoot) folders.push({ id: String(node.id), path: pathTitles.join(' / '), depth });
+        walk(node.children, pathTitles, isRoot ? depth : depth + 1);
+      });
+    };
+    walk(tree);
+    return folders;
+  }
+
+  function openMoveModal(bookmarkId) {
+    if (!moveModal || !moveFolderSelect || !moveConfirmBtn || !bookmarkId) return;
+
+    movingBookmarkId = bookmarkId;
+    moveFolderSelect.innerHTML = '';
+    moveFolderSelect.disabled = true;
+    moveConfirmBtn.disabled = true;
+    if (moveFolderHint) moveFolderHint.textContent = t('popup.move.loading', null, 'Loading folders...');
+    moveModal.style.display = 'flex';
+
+    chrome.bookmarks.get(bookmarkId, (nodes) => {
+      if (chrome.runtime.lastError || !Array.isArray(nodes) || !nodes[0] || !nodes[0].url) {
+        const reason = chrome.runtime.lastError?.message || t('common.unknownError', null, 'Unknown error');
+        closeMoveModal();
+        showToast(t('popup.toasts.bookmarkMoveFailed', { reason }, `Move failed: ${reason}`), { tone: 'error' });
+        return;
+      }
+
+      const sourceParentId = String(nodes[0].parentId || '');
+      getBookmarkTreeCached((tree) => {
+        if (movingBookmarkId !== bookmarkId) return;
+
+        const folders = getAvailableBookmarkFolders(tree);
+        let firstDestinationId = '';
+        folders.forEach((folder) => {
+          const option = document.createElement('option');
+          const isCurrent = folder.id === sourceParentId;
+          option.value = folder.id;
+          option.disabled = isCurrent;
+          option.textContent = isCurrent
+            ? t('popup.move.currentFolder', { name: folder.path }, `${folder.path} (current)`)
+            : folder.path;
+          if (!isCurrent && !firstDestinationId) firstDestinationId = folder.id;
+          moveFolderSelect.appendChild(option);
+        });
+
+        if (!firstDestinationId) {
+          moveFolderSelect.disabled = true;
+          moveConfirmBtn.disabled = true;
+          if (moveFolderHint) moveFolderHint.textContent = t('popup.move.noDestination', null, 'No other destination folder is available.');
+          return;
+        }
+
+        moveFolderSelect.value = firstDestinationId;
+        moveFolderSelect.disabled = false;
+        moveConfirmBtn.disabled = false;
+        if (moveFolderHint) moveFolderHint.textContent = '';
+        moveFolderSelect.focus();
+      });
+    });
+  }
+
+  function setupContextMenuAndModals() {
     if (menuRemoveRecent) {
       menuRemoveRecent.addEventListener('click', () => {
         const activeUrl = targetNodeDomain; // recently saved url
@@ -2181,10 +2324,23 @@ document.addEventListener('DOMContentLoaded', function () {
       if (targetNodeId && targetNodeIsFolder) sortChildren(targetNodeId, 'time');
     });
 
+    if (menuMove) {
+      menuMove.addEventListener('click', () => {
+        const bookmarkId = targetNodeId;
+        contextMenu.style.display = 'none';
+        if (bookmarkId && !targetNodeIsFolder) openMoveModal(bookmarkId);
+      });
+    }
+
     menuEdit.addEventListener('click', () => {
       if (targetNodeId) {
         // 书签项：直接编辑书签
         chrome.bookmarks.get(targetNodeId, (nodes) => {
+          if (chrome.runtime.lastError || !Array.isArray(nodes) || !nodes[0]) {
+            const reason = chrome.runtime.lastError?.message || t('common.unknownError', null, 'Unknown error');
+            showToast(t('popup.toasts.bookmarkEditFailed', { reason }, `Edit failed: ${reason}`), { tone: 'error' });
+            return;
+          }
           const node = nodes[0];
           editModalTitle.textContent = targetNodeIsFolder
             ? t('popup.edit.titleFolder', null, 'Edit Folder')
@@ -2221,6 +2377,42 @@ document.addEventListener('DOMContentLoaded', function () {
       await runSingleBookmarkDelete(targetNodeId, targetNodeIsFolder);
     });
 
+    if (moveCancelBtn) moveCancelBtn.addEventListener('click', closeMoveModal);
+    if (moveModal) {
+      moveModal.addEventListener('click', (e) => {
+        if (e.target === moveModal) closeMoveModal();
+      });
+      moveModal.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape') {
+          e.preventDefault();
+          closeMoveModal();
+        }
+      });
+    }
+    if (moveConfirmBtn) {
+      moveConfirmBtn.addEventListener('click', () => {
+        const bookmarkId = movingBookmarkId;
+        const parentId = moveFolderSelect ? moveFolderSelect.value : '';
+        if (!bookmarkId || !parentId) return;
+
+        moveConfirmBtn.disabled = true;
+        if (moveFolderSelect) moveFolderSelect.disabled = true;
+        chrome.bookmarks.move(bookmarkId, { parentId }, () => {
+          if (chrome.runtime.lastError) {
+            const reason = chrome.runtime.lastError.message || t('common.unknownError', null, 'Unknown error');
+            moveConfirmBtn.disabled = false;
+            if (moveFolderSelect) moveFolderSelect.disabled = false;
+            showToast(t('popup.toasts.bookmarkMoveFailed', { reason }, `Move failed: ${reason}`), { tone: 'error' });
+            return;
+          }
+
+          closeMoveModal();
+          refreshView();
+          showToast(t('popup.toasts.bookmarkMoveDone', null, 'Bookmark moved'), { tone: 'success' });
+        });
+      });
+    }
+
     // Edit modal actions
     editCancelBtn.addEventListener('click', () => {
       editModal.style.display = 'none';
@@ -2237,8 +2429,14 @@ document.addEventListener('DOMContentLoaded', function () {
           updates.url = editUrlInput.value;
         }
         chrome.bookmarks.update(targetNodeId, updates, () => {
+          if (chrome.runtime.lastError) {
+            const reason = chrome.runtime.lastError.message || t('common.unknownError', null, 'Unknown error');
+            showToast(t('popup.toasts.bookmarkEditFailed', { reason }, `Edit failed: ${reason}`), { tone: 'error' });
+            return;
+          }
           editModal.style.display = 'none';
           refreshView();
+          showToast(t('popup.toasts.bookmarkEditDone', null, 'Bookmark updated'), { tone: 'success' });
         });
       } else if (targetNodeDomain) {
         // 历史记录项：保存自定义标题和 URL
@@ -2269,8 +2467,16 @@ document.addEventListener('DOMContentLoaded', function () {
 
   function refreshView() {
     invalidateBookmarkTreeCache();
-    if (navigationStack.length <= 1) buildDashboard();
-    else loadStandardFolder(currentFolderId);
+    if (isSearching) {
+      handleSearch();
+      return;
+    }
+    if (navigationStack.length <= 1) {
+      buildDashboard();
+      return;
+    }
+    const currentNavigation = navigationStack[navigationStack.length - 1] || {};
+    loadStandardFolder(currentFolderId, !!currentNavigation.isUncategorized);
   }
 
   function sortChildren(folderId, type) {
@@ -2340,25 +2546,9 @@ document.addEventListener('DOMContentLoaded', function () {
     setToolsResultMessage(t('popup.tools.statusRunning', null, 'Working...'));
 
     getBookmarkTreeCached((tree) => {
-      const urlMap = new Map();
-      function traverse(nodes) {
-        nodes.forEach(node => {
-          if (node.url) {
-            const u = node.url.trim();
-            if (u) {
-              if (!urlMap.has(u)) urlMap.set(u, []);
-              urlMap.get(u).push(node);
-            }
-          }
-          if (node.children) traverse(node.children);
-        });
-      }
-      traverse(tree);
-
-      const duplicateGroups = [];
-      urlMap.forEach((nodes, url) => {
-        if (nodes.length > 1) duplicateGroups.push({ url, nodes });
-      });
+      const duplicateGroups = toolsModule && typeof toolsModule.collectDuplicateUrlGroups === 'function'
+        ? toolsModule.collectDuplicateUrlGroups(tree)
+        : [];
 
       if (duplicateGroups.length === 0) {
         setToolDetailStatusText(t('popup.tools.duplicatesNone', null, 'Scan complete: no duplicate bookmarks found.'), 'success');
@@ -2415,6 +2605,161 @@ document.addEventListener('DOMContentLoaded', function () {
         });
       });
     }, { forceRefresh });
+  }
+
+  function getDefaultBookmarkStats() {
+    return {
+      totalBookmarks: 0,
+      totalFolders: 0,
+      maxDepth: 0,
+      emptyFolders: 0,
+      httpsCount: 0,
+      httpCount: 0,
+      otherProtocolCount: 0,
+      untitledItems: 0,
+      rootLevelBookmarks: 0,
+      duplicateCount: 0,
+      uniqueDomains: 0,
+      uniqueUrls: 0,
+      averageBookmarksPerFolder: '0.0',
+      topDomains: [],
+      largestFolder: { title: '', count: 0 }
+    };
+  }
+
+  function renderStatsReport(stats) {
+    const {
+      totalBookmarks,
+      totalFolders,
+      maxDepth,
+      emptyFolders,
+      httpsCount,
+      httpCount,
+      otherProtocolCount,
+      untitledItems,
+      rootLevelBookmarks,
+      duplicateCount,
+      uniqueDomains,
+      uniqueUrls,
+      averageBookmarksPerFolder,
+      topDomains,
+      largestFolder
+    } = stats || getDefaultBookmarkStats();
+    const safeBookmarkCount = Math.max(totalBookmarks, 1);
+    const sortedDomains = Array.isArray(topDomains) ? topDomains : [];
+    const topCount = sortedDomains.length > 0 ? sortedDomains[0][1] : 1;
+
+    const linkDistributionRows = [
+      { label: t('popup.tools.statsHttpsLinks', null, 'HTTPS Links'), count: httpsCount, toneClass: 'stats-health-good' },
+      { label: t('popup.tools.statsHttpLinks', null, 'HTTP Links'), count: httpCount, toneClass: httpCount > 0 ? 'stats-health-warning' : 'stats-health-good' },
+      { label: t('popup.tools.statsOtherProtocols', null, 'Other Protocols'), count: otherProtocolCount, toneClass: otherProtocolCount > 0 ? 'stats-health-primary' : 'stats-health-good' },
+      { label: t('popup.tools.statsRootLevelBookmarks', null, 'Root-Level Bookmarks'), count: rootLevelBookmarks, toneClass: rootLevelBookmarks > 0 ? 'stats-health-warning' : 'stats-health-good' }
+    ].map(({ label, count, toneClass }) => {
+      const percent = Math.round((count / safeBookmarkCount) * 100);
+      const valueText = count > 0
+        ? t('popup.tools.statsCountWithPercent', { count, percent }, `${count} items (${percent}%)`)
+        : t('popup.tools.statsNone', null, 'None');
+      return `
+        <div class="stats-health-row">
+          <span class="stats-health-label">${escapeHtml(label)}</span>
+          <span class="stats-health-value ${toneClass}">${escapeHtml(valueText)}</span>
+        </div>`;
+    }).join('');
+
+    const largestFolderText = largestFolder.count > 0
+      ? `${escapeHtml(largestFolder.title || t('common.untitled', null, 'Untitled'))} (${escapeHtml(t('popup.tools.statsItems', { count: largestFolder.count }, `${largestFolder.count} items`))})`
+      : escapeHtml(t('popup.tools.statsNone', null, 'None'));
+
+    const domainHtml = sortedDomains.map(([domain, count], idx) => {
+      const pct = Math.round((count / topCount) * 100);
+      return `
+        <div class="stats-domain-row">
+          <span class="stats-domain-rank">${idx + 1}</span>
+          <div class="stats-domain-main">
+            <span class="stats-domain-name">${escapeHtml(domain)}</span>
+            <div class="stats-domain-bar">
+              <div class="stats-domain-fill" data-fill="${pct}"></div>
+            </div>
+          </div>
+          <span class="stats-domain-count">${count}</span>
+        </div>`;
+    }).join('');
+
+    return `
+      <div class="stats-card-grid stats-card-grid-tight">
+        <div class="stat-card stat-card-compact">
+          <div class="stat-value stat-value-medium">${totalBookmarks}</div>
+          <div class="stat-label">${escapeHtml(t('popup.tools.statsTotalBookmarks', null, 'Bookmarks'))}</div>
+        </div>
+        <div class="stat-card stat-card-compact">
+          <div class="stat-value stat-value-medium">${totalFolders}</div>
+          <div class="stat-label">${escapeHtml(t('popup.tools.statsTotalFolders', null, 'Folders'))}</div>
+        </div>
+        <div class="stat-card stat-card-compact">
+          <div class="stat-value stat-value-medium">${uniqueDomains}</div>
+          <div class="stat-label">${escapeHtml(t('popup.tools.statsUniqueDomains', null, 'Unique Domains'))}</div>
+        </div>
+        <div class="stat-card stat-card-compact">
+          <div class="stat-value stat-value-medium">${uniqueUrls}</div>
+          <div class="stat-label">${escapeHtml(t('popup.tools.statsUniqueUrls', null, 'Unique URLs'))}</div>
+        </div>
+        <div class="stat-card stat-card-compact">
+          <div class="stat-value stat-value-medium">${maxDepth}</div>
+          <div class="stat-label">${escapeHtml(t('popup.tools.statsMaxDepth', null, 'Max Depth'))}</div>
+        </div>
+        <div class="stat-card stat-card-compact">
+          <div class="stat-value stat-value-medium ${emptyFolders > 0 ? 'stat-value-warning' : ''}">${emptyFolders}</div>
+          <div class="stat-label">${escapeHtml(t('popup.tools.statsEmptyFolders', null, 'Empty Folders'))}</div>
+        </div>
+      </div>
+
+      <div class="stats-section">
+        <div class="stats-section-title">${escapeHtml(t('popup.tools.statsTopDomains', null, 'Top 10 Domains'))}</div>
+        <div class="stats-section-panel stats-domain-list">
+          ${domainHtml || `<div class="stats-empty">${escapeHtml(t('common.noData', null, 'No data'))}</div>`}
+        </div>
+      </div>
+
+      <div class="stats-section">
+        <div class="stats-section-title">${escapeHtml(t('popup.tools.statsLinkDistribution', null, 'Link Distribution'))}</div>
+        <div class="stats-section-panel stats-health-list">
+          ${linkDistributionRows}
+        </div>
+      </div>
+
+      <div class="stats-section">
+        <div class="stats-section-title">${escapeHtml(t('popup.tools.statsStructureHealth', null, 'Structure Health'))}</div>
+        <div class="stats-section-panel stats-health-list">
+          <div class="stats-health-row">
+            <span class="stats-health-label">${escapeHtml(t('popup.tools.statsDuplicateLinks', null, 'Duplicate Links'))}</span>
+            <span class="stats-health-value ${duplicateCount > 0 ? 'stats-health-warning' : 'stats-health-good'}">${duplicateCount > 0 ? escapeHtml(t('popup.tools.statsGroups', { count: duplicateCount }, `${duplicateCount} groups`)) : escapeHtml(t('popup.tools.statsNone', null, 'None'))}</span>
+          </div>
+          <div class="stats-health-row">
+            <span class="stats-health-label">${escapeHtml(t('popup.tools.statsEmptyFolders', null, 'Empty Folders'))}</span>
+            <span class="stats-health-value ${emptyFolders > 0 ? 'stats-health-warning' : 'stats-health-good'}">${emptyFolders > 0 ? escapeHtml(t('popup.tools.statsItems', { count: emptyFolders }, `${emptyFolders} items`)) : escapeHtml(t('popup.tools.statsNone', null, 'None'))}</span>
+          </div>
+          <div class="stats-health-row">
+            <span class="stats-health-label">${escapeHtml(t('popup.tools.statsUntitledItems', null, 'Untitled Items'))}</span>
+            <span class="stats-health-value ${untitledItems > 0 ? 'stats-health-warning' : 'stats-health-good'}">${untitledItems > 0 ? escapeHtml(t('popup.tools.statsItems', { count: untitledItems }, `${untitledItems} items`)) : escapeHtml(t('popup.tools.statsNone', null, 'None'))}</span>
+          </div>
+          <div class="stats-health-row">
+            <span class="stats-health-label">${escapeHtml(t('popup.tools.statsAvgPerFolder', null, 'Avg Bookmarks per Folder'))}</span>
+            <span class="stats-health-value stats-health-primary">${escapeHtml(t('popup.tools.statsAvgValue', { value: averageBookmarksPerFolder }, `${averageBookmarksPerFolder} / folder`))}</span>
+          </div>
+          <div class="stats-health-row">
+            <span class="stats-health-label">${escapeHtml(t('popup.tools.statsLargestFolder', null, 'Largest Folder'))}</span>
+            <span class="stats-health-value stats-health-primary">${largestFolderText}</span>
+          </div>
+        </div>
+      </div>`;
+  }
+
+  function applyStatsDomainFillWidths(container) {
+    if (!container || !container.querySelectorAll) return;
+    container.querySelectorAll('.stats-domain-fill').forEach((el) => {
+      const pct = Math.max(0, Math.min(100, Number(el.dataset.fill || 0)));
+      el.style.width = `${pct}%`;
+    });
   }
 
   function setupToolsListeners() {
@@ -2487,7 +2832,7 @@ document.addEventListener('DOMContentLoaded', function () {
 
         toolDetailMainAction.innerHTML = `<button id="btnStartFindDuplicates" class="tool-btn tool-btn-primary">${escapeHtml(t('popup.tools.duplicatesStart', null, 'Start Scan'))}</button>`;
         toolDetailWarning.style.display = 'block';
-        toolDetailWarning.innerHTML = t('popup.tools.duplicatesWarning', null, '💡 Duplicates are detected by exact URL match. Bulk cleanup cannot be undone.');
+        toolDetailWarning.innerHTML = t('popup.tools.duplicatesWarning', null, '💡 Duplicates are detected by exact URL match. Deleted bookmarks cannot be restored here.');
 
         document.getElementById('btnStartFindDuplicates').addEventListener('click', (e) => {
           runDuplicateScan(e.currentTarget);
@@ -2514,207 +2859,14 @@ document.addEventListener('DOMContentLoaded', function () {
           setToolDetailStatusText(t('popup.tools.statsCollecting', null, 'Running: collecting data...'));
 
           getBookmarkTreeCached((tree) => {
-            let totalBookmarks = 0;
-            let totalFolders = 0;
-            let maxDepth = 0;
-            let emptyFolders = 0;
-            let httpsCount = 0;
-            let httpCount = 0;
-            let otherProtocolCount = 0;
-            let untitledItems = 0;
-            let rootLevelBookmarks = 0;
-            const domainMap = new Map();
-            const urlSet = new Map(); // url -> count
-            let largestFolder = { title: '-', count: 0 };
-
-            function traverse(nodes, depth, parentId = null) {
-              nodes.forEach(node => {
-                const title = typeof node.title === 'string' ? node.title.trim() : '';
-                const isBookmark = Boolean(node.url);
-
-                if (!title && node.id !== '0') {
-                  untitledItems++;
-                }
-
-                if (isBookmark) {
-                  totalBookmarks++;
-                  if (parentId === '0' || parentId === '1' || parentId === '2') {
-                    rootLevelBookmarks++;
-                  }
-                  // 域名统计
-                  try {
-                    const parsedUrl = new URL(node.url);
-                    const hostname = parsedUrl.hostname;
-                    if (hostname) {
-                      domainMap.set(hostname, (domainMap.get(hostname) || 0) + 1);
-                    }
-                    if (parsedUrl.protocol === 'https:') httpsCount++;
-                    else if (parsedUrl.protocol === 'http:') httpCount++;
-                    else otherProtocolCount++;
-                  } catch (_) { /* 忽略非法 URL */ }
-                  // 重复 URL 统计
-                  const u = node.url.trim();
-                  if (u) urlSet.set(u, (urlSet.get(u) || 0) + 1);
-                } else if (node.children) {
-                  totalFolders++;
-                  if (depth > maxDepth) maxDepth = depth;
-                  if (node.children.length === 0 && node.id !== '0' && node.id !== '1' && node.id !== '2') {
-                    emptyFolders++;
-                  }
-                  // 最大文件夹
-                  const directChildren = node.children.length;
-                  if (directChildren > largestFolder.count && node.id !== '0') {
-                    largestFolder = { title: node.title || t('common.untitled', null, 'Untitled'), count: directChildren };
-                  }
-                  traverse(node.children, depth + 1, node.id);
-                }
-              });
-            }
-            traverse(tree, 1, null);
-
-            // 重复链接数
-            let duplicateCount = 0;
-            urlSet.forEach((count) => { if (count > 1) duplicateCount++; });
-
-            const uniqueDomains = domainMap.size;
-            const uniqueUrls = urlSet.size;
-            const averageBookmarksPerFolder = totalFolders > 0 ? (totalBookmarks / totalFolders).toFixed(1) : '0.0';
-            const safeBookmarkCount = Math.max(totalBookmarks, 1);
-
-            // 域名 Top 10
-            const sortedDomains = [...domainMap.entries()]
-              .sort((a, b) => b[1] - a[1])
-              .slice(0, 10);
-            const topCount = sortedDomains.length > 0 ? sortedDomains[0][1] : 1;
-
-            const linkDistributionRows = [
-              {
-                label: t('popup.tools.statsHttpsLinks', null, 'HTTPS Links'),
-                count: httpsCount,
-                toneClass: 'stats-health-good'
-              },
-              {
-                label: t('popup.tools.statsHttpLinks', null, 'HTTP Links'),
-                count: httpCount,
-                toneClass: httpCount > 0 ? 'stats-health-warning' : 'stats-health-good'
-              },
-              {
-                label: t('popup.tools.statsOtherProtocols', null, 'Other Protocols'),
-                count: otherProtocolCount,
-                toneClass: otherProtocolCount > 0 ? 'stats-health-primary' : 'stats-health-good'
-              },
-              {
-                label: t('popup.tools.statsRootLevelBookmarks', null, 'Root-Level Bookmarks'),
-                count: rootLevelBookmarks,
-                toneClass: rootLevelBookmarks > 0 ? 'stats-health-warning' : 'stats-health-good'
-              }
-            ].map(({ label, count, toneClass }) => {
-              const percent = Math.round((count / safeBookmarkCount) * 100);
-              const valueText = count > 0
-                ? t('popup.tools.statsCountWithPercent', { count, percent }, `${count} items (${percent}%)`)
-                : t('popup.tools.statsNone', null, 'None');
-              return `
-                <div class="stats-health-row">
-                  <span class="stats-health-label">${escapeHtml(label)}</span>
-                  <span class="stats-health-value ${toneClass}">${escapeHtml(valueText)}</span>
-                </div>
-              `;
-            }).join('');
-
-            const largestFolderText = largestFolder.count > 0
-              ? `${escapeHtml(largestFolder.title)} (${escapeHtml(t('popup.tools.statsItems', { count: largestFolder.count }, `${largestFolder.count} items`))})`
-              : escapeHtml(t('popup.tools.statsNone', null, 'None'));
-
-            let domainHtml = '';
-            sortedDomains.forEach(([domain, count], idx) => {
-              const pct = Math.round((count / topCount) * 100);
-              domainHtml += `
-                <div class="stats-domain-row">
-                  <span class="stats-domain-rank">${idx + 1}</span>
-                  <div class="stats-domain-main">
-                    <span class="stats-domain-name">${escapeHtml(domain)}</span>
-                    <div class="stats-domain-bar">
-                      <div class="stats-domain-fill" data-fill="${pct}"></div>
-                    </div>
-                  </div>
-                  <span class="stats-domain-count">${count}</span>
-                </div>`;
-            });
+            const stats = toolsModule && typeof toolsModule.analyzeBookmarkStats === 'function'
+              ? toolsModule.analyzeBookmarkStats(tree)
+              : getDefaultBookmarkStats();
 
             setToolDetailStatusText(t('popup.tools.statsDone', null, 'Analysis complete'), 'success');
-            toolsResultList.innerHTML = `
-              <div class="stats-card-grid stats-card-grid-tight">
-                <div class="stat-card stat-card-compact">
-                  <div class="stat-value stat-value-medium">${totalBookmarks}</div>
-                  <div class="stat-label">${escapeHtml(t('popup.tools.statsTotalBookmarks', null, 'Bookmarks'))}</div>
-                </div>
-                <div class="stat-card stat-card-compact">
-                  <div class="stat-value stat-value-medium">${totalFolders}</div>
-                  <div class="stat-label">${escapeHtml(t('popup.tools.statsTotalFolders', null, 'Folders'))}</div>
-                </div>
-                <div class="stat-card stat-card-compact">
-                  <div class="stat-value stat-value-medium">${uniqueDomains}</div>
-                  <div class="stat-label">${escapeHtml(t('popup.tools.statsUniqueDomains', null, 'Unique Domains'))}</div>
-                </div>
-                <div class="stat-card stat-card-compact">
-                  <div class="stat-value stat-value-medium">${uniqueUrls}</div>
-                  <div class="stat-label">${escapeHtml(t('popup.tools.statsUniqueUrls', null, 'Unique URLs'))}</div>
-                </div>
-                <div class="stat-card stat-card-compact">
-                  <div class="stat-value stat-value-medium">${maxDepth}</div>
-                  <div class="stat-label">${escapeHtml(t('popup.tools.statsMaxDepth', null, 'Max Depth'))}</div>
-                </div>
-                <div class="stat-card stat-card-compact">
-                  <div class="stat-value stat-value-medium ${emptyFolders > 0 ? 'stat-value-warning' : ''}">${emptyFolders}</div>
-                  <div class="stat-label">${escapeHtml(t('popup.tools.statsEmptyFolders', null, 'Empty Folders'))}</div>
-                </div>
-              </div>
-
-              <div class="stats-section">
-                <div class="stats-section-title">${escapeHtml(t('popup.tools.statsTopDomains', null, 'Top 10 Domains'))}</div>
-                <div class="stats-section-panel stats-domain-list">
-                  ${domainHtml || `<div class="stats-empty">${escapeHtml(t('common.noData', null, 'No data'))}</div>`}
-                </div>
-              </div>
-
-              <div class="stats-section">
-                <div class="stats-section-title">${escapeHtml(t('popup.tools.statsLinkDistribution', null, 'Link Distribution'))}</div>
-                <div class="stats-section-panel stats-health-list">
-                  ${linkDistributionRows}
-                </div>
-              </div>
-
-              <div class="stats-section">
-                <div class="stats-section-title">${escapeHtml(t('popup.tools.statsStructureHealth', null, 'Structure Health'))}</div>
-                <div class="stats-section-panel stats-health-list">
-                  <div class="stats-health-row">
-                    <span class="stats-health-label">${escapeHtml(t('popup.tools.statsDuplicateLinks', null, 'Duplicate Links'))}</span>
-                    <span class="stats-health-value ${duplicateCount > 0 ? 'stats-health-warning' : 'stats-health-good'}">${duplicateCount > 0 ? escapeHtml(t('popup.tools.statsGroups', { count: duplicateCount }, `${duplicateCount} groups`)) : escapeHtml(t('popup.tools.statsNone', null, 'None'))}</span>
-                  </div>
-                  <div class="stats-health-row">
-                    <span class="stats-health-label">${escapeHtml(t('popup.tools.statsEmptyFolders', null, 'Empty Folders'))}</span>
-                    <span class="stats-health-value ${emptyFolders > 0 ? 'stats-health-warning' : 'stats-health-good'}">${emptyFolders > 0 ? escapeHtml(t('popup.tools.statsItems', { count: emptyFolders }, `${emptyFolders} items`)) : escapeHtml(t('popup.tools.statsNone', null, 'None'))}</span>
-                  </div>
-                  <div class="stats-health-row">
-                    <span class="stats-health-label">${escapeHtml(t('popup.tools.statsUntitledItems', null, 'Untitled Items'))}</span>
-                    <span class="stats-health-value ${untitledItems > 0 ? 'stats-health-warning' : 'stats-health-good'}">${untitledItems > 0 ? escapeHtml(t('popup.tools.statsItems', { count: untitledItems }, `${untitledItems} items`)) : escapeHtml(t('popup.tools.statsNone', null, 'None'))}</span>
-                  </div>
-                  <div class="stats-health-row">
-                    <span class="stats-health-label">${escapeHtml(t('popup.tools.statsAvgPerFolder', null, 'Avg Bookmarks per Folder'))}</span>
-                    <span class="stats-health-value stats-health-primary">${escapeHtml(t('popup.tools.statsAvgValue', { value: averageBookmarksPerFolder }, `${averageBookmarksPerFolder} / folder`))}</span>
-                  </div>
-                  <div class="stats-health-row">
-                    <span class="stats-health-label">${escapeHtml(t('popup.tools.statsLargestFolder', null, 'Largest Folder'))}</span>
-                    <span class="stats-health-value stats-health-primary">${largestFolderText}</span>
-                  </div>
-                </div>
-              </div>
-            `;
-            toolsResultList.querySelectorAll('.stats-domain-fill').forEach((el) => {
-              const pct = Math.max(0, Math.min(100, Number(el.dataset.fill || 0)));
-              el.style.width = `${pct}%`;
-            });
-            document.getElementById('statusStats').textContent = t('popup.tools.statsCountLabel', { count: totalBookmarks }, `${totalBookmarks} bookmarks total`);
+            toolsResultList.innerHTML = renderStatsReport(stats);
+            applyStatsDomainFillWidths(toolsResultList);
+            document.getElementById('statusStats').textContent = t('popup.tools.statsCountLabel', { count: stats.totalBookmarks }, `${stats.totalBookmarks} bookmarks total`);
             btn.disabled = false;
             btn.textContent = t('popup.tools.statsReanalyze', null, 'Analyze Again');
           });
@@ -2729,10 +2881,16 @@ document.addEventListener('DOMContentLoaded', function () {
         setToolDetailStatusText(t('popup.tools.brokenIdle', null, 'Status: not scanned yet'));
         toolDetailMainAction.innerHTML = `<button id="btnStartCheckBroken" class="tool-btn tool-btn-primary">${escapeHtml(t('popup.tools.brokenStart', null, 'Start Check'))}</button>`;
         toolDetailWarning.style.display = 'block';
-        toolDetailWarning.innerHTML = t('popup.tools.brokenWarning', null, '⚠️ Strategy: probe with HEAD first, retry by confidence level, and mark uncertain links for manual review to avoid false deletes.');
+        toolDetailWarning.innerHTML = t('popup.tools.brokenWarning', null, '⚠️ Strategy: probe with HEAD first, retry by confidence level, and mark uncertain links for manual review. Review selected links before deletion.');
 
         document.getElementById('btnStartCheckBroken').addEventListener('click', async (e) => {
           const btn = e.target;
+          const permissionGranted = await ensureBrokenLinkHostPermission();
+          if (!permissionGranted) {
+            setToolDetailStatusText(t('popup.tools.brokenPermissionRequired', null, 'Website access permission is required to check bookmark links.'), 'error', true);
+            setToolsResultMessage(t('popup.tools.brokenPermissionRequiredResult', null, 'Grant website access when prompted, then try again.'), 'error');
+            return;
+          }
           btn.className = 'tool-btn tool-btn-primary';
           btn.disabled = true;
           btn.textContent = t('popup.tools.statusRunning', null, 'Working...');
@@ -2924,7 +3082,7 @@ document.addEventListener('DOMContentLoaded', function () {
         setToolDetailStatusText(t('popup.tools.emptyFoldersIdle', null, 'Status: not analyzed yet'));
         toolDetailMainAction.innerHTML = `<button id="btnStartCleanEmpty" class="tool-btn tool-btn-primary">${escapeHtml(t('popup.tools.emptyFoldersStart', null, 'Start Scan'))}</button>`;
         toolDetailWarning.style.display = 'block';
-        toolDetailWarning.innerHTML = t('popup.tools.emptyFoldersWarning', null, '💡 Finds and permanently removes folders that contain neither bookmarks nor any valid child folders.');
+        toolDetailWarning.innerHTML = t('popup.tools.emptyFoldersWarning', null, '💡 Finds and permanently removes folders that contain neither bookmarks nor any valid child folders. Review selected folders before deletion.');
 
         document.getElementById('btnStartCleanEmpty').addEventListener('click', (e) => {
           const btn = e.target;
@@ -2936,23 +3094,9 @@ document.addEventListener('DOMContentLoaded', function () {
           setToolsResultMessage(t('popup.tools.statusRunning', null, 'Working...'));
 
           getBookmarkTreeCached((tree) => {
-            let emptyFolders = [];
-            // 只找最底层的、没有任何子项的文件夹
-            function traverse(nodes) {
-              nodes.forEach(node => {
-                // exclude root and basic roots if possible
-                if (!node.url && node.id !== '0' && node.id !== '1' && node.id !== '2') {
-                  if (!node.children || node.children.length === 0) {
-                    emptyFolders.push(node);
-                  } else {
-                    traverse(node.children);
-                  }
-                } else if (node.children) {
-                  traverse(node.children);
-                }
-              });
-            }
-            traverse(tree);
+            const emptyFolders = toolsModule && typeof toolsModule.collectLeafEmptyFolders === 'function'
+              ? toolsModule.collectLeafEmptyFolders(tree)
+              : [];
 
             if (emptyFolders.length === 0) {
               setToolDetailStatusText(t('popup.tools.emptyFoldersNone', null, 'Scan complete: no empty folders found.'), 'success');

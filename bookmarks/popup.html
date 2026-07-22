@@ -191,7 +191,7 @@
                 </svg></div>
               <div class="tool-item-info">
                 <span class="tool-item-title" data-i18n="popup.tools.batchReplaceTitle">批量替换 URL</span>
-                <span class="tool-item-desc" id="statusReplaceUrl" data-i18n="popup.tools.batchReplaceDesc">使用正则匹配并修改多个链接后缀</span>
+                <span class="tool-item-desc" id="statusReplaceUrl" data-i18n="popup.tools.batchReplaceDesc">使用正则表达式批量修改书签链接</span>
               </div>
             </button>
           </div>
@@ -243,6 +243,26 @@
     </div>
   </div>
 
+  <!-- 移动书签弹窗 -->
+  <div class="modal" id="moveModal">
+    <div class="modal-content small">
+      <div class="modal-header">
+        <h2 data-i18n="popup.move.title">移动到文件夹</h2>
+      </div>
+      <div class="modal-body">
+        <div class="form-group move-folder-group">
+          <label for="moveFolderSelect" data-i18n="popup.move.folderLabel">目标文件夹</label>
+          <select id="moveFolderSelect"></select>
+        </div>
+        <div id="moveFolderHint" class="move-folder-hint" aria-live="polite"></div>
+      </div>
+      <div class="modal-footer">
+        <button class="footer-icon-btn" id="moveCancelBtn" type="button" data-i18n="common.cancel">取消</button>
+        <button class="footer-icon-btn primary-btn" id="moveConfirmBtn" type="button" data-i18n="popup.move.confirm">移动</button>
+      </div>
+    </div>
+  </div>
+
   <!-- 危险操作确认弹窗（替代原生 confirm） -->
   <div class="modal confirm-modal" id="confirmModal">
     <div class="modal-content small confirm-modal-content">
@@ -263,11 +283,11 @@
   <!-- 上下文菜单 -->
   <div id="contextMenu" class="context-menu">
     <div class="menu-item" id="menuPin" data-i18n="popup.contextMenu.addToPinned">添加到我的置顶</div>
-    <div class="menu-item is-hidden" id="menuAddToGroup" data-i18n="popup.contextMenu.addToGroup">添加到我的分组</div>
     <div class="menu-item" id="menuSortName" data-i18n="popup.contextMenu.sortByName">按名称排序</div>
     <div class="menu-item" id="menuSortTime" data-i18n="popup.contextMenu.sortByTime">按时间排序</div>
     <div class="menu-item is-hidden" id="menuRemoveRecent" data-i18n="popup.contextMenu.removeFromRecent">从最近访问列表移除</div>
     <div class="menu-divider" id="menuDivider1"></div>
+    <div class="menu-item" id="menuMove" data-i18n="popup.contextMenu.moveToFolder">移动到文件夹</div>
     <div class="menu-item" id="menuEdit" data-i18n="popup.contextMenu.edit">编辑</div>
     <div class="menu-item danger" id="menuDelete" data-i18n="popup.contextMenu.delete">删除</div>
   </div>

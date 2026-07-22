@@ -1,5 +1,32 @@
 # Changelog
 
+## 2026-07-22
+
+### Added
+- Added `npm run verify` to check JavaScript syntax, release packaging assumptions, bookmark tool helpers, and URL replacement rules.
+- Added optional website access permission requested only when the broken-link scan is started.
+
+### Changed
+- Changed batch URL replacement from plain text matching to JavaScript regular expression rules, including `/pattern/flags` input support and invalid-regex feedback.
+- Updated the release workflow to read the version from `manifest.json`, run verification before packaging, and reuse the local packaging script.
+- Updated local packaging to stage release files first and exclude nested `.zip` files from packaged extension folders.
+- Updated README and privacy policy copy for permissions, provider naming, and local verification.
+- Updated CI so pushes and pull requests run verification while releases remain manual-only.
+- Bumped the extension version to `1.4.1`.
+
+### Removed
+- Removed the unfinished "Add to Group" context-menu entry from recent items.
+
+### Fixed
+- Fixed bookmark moves and deletions not immediately refreshing the active view.
+- Fixed pinned folders and the virtual uncategorized view exposing incorrect context-menu actions.
+- Fixed stale search requests overriding newer results and empty recent-session titles causing errors.
+- Fixed uncategorized navigation state being lost after breadcrumb navigation, search clearing, or drag-and-drop refreshes.
+- Fixed NASA fallback dates skipping extra days after non-image or failed responses.
+- Fixed batch URL replacement overwriting URLs changed after preview.
+- Fixed bookmark edit failures closing the dialog without feedback.
+- Added a folder picker for moving individual bookmarks, including bookmarks shown in the virtual uncategorized view.
+
 ## 2026-04-02
 
 ### Changed

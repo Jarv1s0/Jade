@@ -1,0 +1,8 @@
+{
+  "name": "jade-extension",
+  "private": true,
+  "scripts": {
+    "check:syntax": "node --check bookmarks/popup.js && node --check bookmarks/modules/bookmark-service.js && node --check bookmarks/modules/context-menu.js && node --check bookmarks/modules/dashboard.js && node --check bookmarks/modules/toolbox-view.js && node --check bookmarks/modules/tools.js && node --check bookmarks/modules/url-replace-tool.js && node --check newtab/script.js && node --check newtab/modules/providers.js && node --check shared/i18n.js",
+    "verify": "npm run check:syntax && node scripts/verify.mjs"
+  }
+}

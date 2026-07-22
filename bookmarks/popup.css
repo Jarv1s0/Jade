@@ -1473,7 +1473,8 @@
 	  margin-bottom: 6px;
 	}
 
-	.form-group input {
+	.form-group input,
+	.form-group select {
 	  width: 100%;
 	  padding: 8px 12px;
 	  border: 1px solid var(--border-color);
@@ -1484,9 +1485,27 @@
 	  box-sizing: border-box;
 	}
 
-	.form-group input:focus {
+	.form-group input:focus,
+	.form-group select:focus {
 	  outline: none;
 	  border-color: var(--accent-color);
+	}
+
+	.form-group select {
+	  min-height: 38px;
+	  background: var(--bg-base);
+	  color: var(--text-primary);
+	}
+
+	.move-folder-group {
+	  margin-bottom: 8px;
+	}
+
+	.move-folder-hint {
+	  min-height: 18px;
+	  font-size: 12px;
+	  line-height: 1.5;
+	  color: var(--text-tertiary);
 	}
 
 	/* Toast 提示 */
