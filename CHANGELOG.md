@@ -12,7 +12,7 @@
 - Updated local packaging to stage release files first and exclude nested `.zip` files from packaged extension folders.
 - Updated README and privacy policy copy for permissions, provider naming, and local verification.
 - Updated CI so pushes and pull requests run verification while releases remain manual-only.
-- Bumped the extension version to `1.4.1`.
+- Bumped the extension version to `1.5.0`.
 
 ### Removed
 - Removed the unfinished "Add to Group" context-menu entry from recent items.
