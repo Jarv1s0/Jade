@@ -1,5 +1,18 @@
 # Changelog
 
+## 2026-10-14
+
+### Changed
+- Bumped the extension version to `1.6.0`.
+
+### Fixed
+- Preserved the real bookmark-folder ancestry when opening dashboard, pinned, and nested folders so breadcrumb drag targets use the correct parent.
+- Disabled drag reordering in the virtual uncategorized view to prevent accidental cross-root moves and invalid indices.
+- Gave folders stable local pin identities, including same-named siblings, while keeping URL pins synchronized across devices.
+- Propagated bookmark-tree read failures instead of caching them as an empty library or reporting false-clean scan results.
+- Escaped bookmark titles and URLs correctly when rendering HTML attributes.
+- Reported folder sorting failures and stopped silently accepting partial reorder operations.
+
 ## 2026-07-22
 
 ### Added

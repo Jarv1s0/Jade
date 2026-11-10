@@ -86,6 +86,8 @@ document.addEventListener('DOMContentLoaded', function () {
   let navigationStack = [];
   let isSearching = false;
   let searchRequestToken = 0;
+  let navigationRequestToken = 0;
+  let contextMenuRequestToken = 0;
   let targetNodeId = null;
   let targetNodeIsFolder = false;
   let targetNodeDomain = null; // New for history items
@@ -120,6 +122,8 @@ document.addEventListener('DOMContentLoaded', function () {
   let bookmarkViewRefreshTimer = null;
   const PINNED_PREF_KEYS = ['pinned_bookmarks', 'frequent_order'];
   const CUSTOM_PREF_KEYS = ['frequent_custom_titles', 'frequent_custom_urls'];
+  const PIN_MIGRATION_MARKER_KEY = 'migrated_local_folder_pin_keys_v1';
+  const CUSTOM_MIGRATION_MARKER_KEY = 'migrated_local_folder_custom_keys_v1';
   const preferenceStorageArea = chrome.storage.sync || chrome.storage.local;
   const DEAD_LINK_CACHE_KEY = 'dead_link_probe_cache_v1';
   const DEAD_LINK_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
@@ -136,10 +140,10 @@ document.addEventListener('DOMContentLoaded', function () {
   ];
   let deadLinkProbeCache = {};
   let deadLinkCachePersistTimer = null;
-
-  function getCurrentFolderPathTitles() {
-    return navigationStack.slice(1).map(item => item.title || '').filter(Boolean);
-  }
+  let migratedFolderPinKeys = new Set();
+  let migratedFolderCustomKeys = new Set();
+  let loadedLegacyPinSeeds = { pinned_bookmarks: [], frequent_order: [] };
+  let loadedLegacyCustomSeeds = { frequent_custom_titles: {}, frequent_custom_urls: {} };
 
   function normalizeUrlForPin(url) {
     if (typeof url !== 'string') return '';
@@ -193,20 +197,82 @@ document.addEventListener('DOMContentLoaded', function () {
 
   function isStablePinKey(value) {
     return typeof value === 'string'
-      && (value.startsWith('url:') || value.startsWith('folder:'));
+      && (value.startsWith('url:')
+        || value.startsWith('folder:')
+        || value.startsWith('folder-v2:')
+        || value.startsWith('folder-id:'));
+  }
+
+  function isFolderPinKey(value) {
+    if (bookmarkService && typeof bookmarkService.isFolderPinKey === 'function') {
+      return bookmarkService.isFolderPinKey(value);
+    }
+    return typeof value === 'string'
+      && (value.startsWith('folder:')
+        || value.startsWith('folder-v2:')
+        || value.startsWith('folder-id:'));
+  }
+
+  function isLegacyFolderPinKey(value) {
+    return typeof value === 'string'
+      && (value.startsWith('folder:') || value.startsWith('folder-v2:'));
+  }
+
+  function mergeUniquePinLists(primary, local) {
+    if (bookmarkService && typeof bookmarkService.mergeSyncedAndLocalPinLists === 'function') {
+      return bookmarkService.mergeSyncedAndLocalPinLists(primary, local);
+    }
+    const synced = Array.from(new Set(Array.isArray(primary) ? primary : []));
+    const localList = Array.isArray(local) ? local : [];
+    let syncedIndex = 0;
+    const merged = [];
+    localList.forEach((entry) => {
+      if (isFolderPinKey(entry)) {
+        merged.push(entry);
+      } else if (syncedIndex < synced.length) {
+        merged.push(synced[syncedIndex++]);
+      }
+    });
+    while (syncedIndex < synced.length) merged.push(synced[syncedIndex++]);
+    return Array.from(new Set(merged));
+  }
+
+  function mergeCustomPreferenceMaps(primary, local) {
+    if (bookmarkService && typeof bookmarkService.mergeSyncedAndLocalPreferenceMaps === 'function') {
+      return bookmarkService.mergeSyncedAndLocalPreferenceMaps(primary, local);
+    }
+    const merged = { ...((primary && typeof primary === 'object') ? primary : {}) };
+    Object.entries((local && typeof local === 'object') ? local : {}).forEach(([key, value]) => {
+      if (isFolderPinKey(key)) merged[key] = value;
+    });
+    return merged;
   }
 
   function buildPinMaps(tree) {
     const idToPinKey = new Map();
     const nodeByPinKey = new Map();
+    const folderMetadata = bookmarkService && typeof bookmarkService.buildFolderPinMetadata === 'function'
+      ? bookmarkService.buildFolderPinMetadata(tree)
+      : {
+        idToPinKey: bookmarkService && typeof bookmarkService.buildFolderPinKeyMap === 'function'
+          ? bookmarkService.buildFolderPinKeyMap(tree)
+          : new Map(),
+        legacyAliases: new Map(),
+        aliasesByPinKey: new Map()
+      };
+    const folderPinKeys = folderMetadata.idToPinKey;
+    const legacyPinKeyAliases = folderMetadata.legacyAliases;
+    const aliasesByPinKey = folderMetadata.aliasesByPinKey || new Map();
 
     function walk(nodes, parentPathTitles = []) {
       (nodes || []).forEach((node) => {
         if (!node) return;
 
-        const pinKey = getNodePinKey(node, parentPathTitles);
+        const pinKey = node.url
+          ? getBookmarkPinKey(node.url)
+          : (folderPinKeys.get(String(node.id)) || getNodePinKey(node, parentPathTitles));
         if (node.id !== '0' && pinKey) {
-          idToPinKey.set(node.id, pinKey);
+          idToPinKey.set(String(node.id), pinKey);
           if (!nodeByPinKey.has(pinKey)) {
             nodeByPinKey.set(pinKey, node);
           }
@@ -222,28 +288,34 @@ document.addEventListener('DOMContentLoaded', function () {
     }
 
     walk(Array.isArray(tree) ? tree : []);
-    return { idToPinKey, nodeByPinKey };
+    return { idToPinKey, nodeByPinKey, legacyPinKeyAliases, aliasesByPinKey };
   }
 
-  function migrateStoredPinList(list, idToPinKey) {
+  function migrateStoredPinList(list, idToPinKey, legacyPinKeyAliases) {
+    if (bookmarkService && typeof bookmarkService.migrateStoredPinList === 'function') {
+      return bookmarkService.migrateStoredPinList(list, idToPinKey, legacyPinKeyAliases);
+    }
     const migrated = [];
     const seen = new Set();
     let changed = false;
 
     (Array.isArray(list) ? list : []).forEach((entry) => {
-      let stableKey = '';
+      let stableKeys = [];
       if (isStablePinKey(entry)) {
-        stableKey = entry;
+        stableKeys = legacyPinKeyAliases.get(entry) || [entry];
+        if (stableKeys.length !== 1 || stableKeys[0] !== entry) changed = true;
       } else if (idToPinKey.has(String(entry))) {
-        stableKey = idToPinKey.get(String(entry));
+        stableKeys = [idToPinKey.get(String(entry))];
         changed = true;
       } else {
         changed = true;
       }
 
-      if (!stableKey || seen.has(stableKey)) return;
-      seen.add(stableKey);
-      migrated.push(stableKey);
+      stableKeys.forEach((stableKey) => {
+        if (!stableKey || seen.has(stableKey)) return;
+        seen.add(stableKey);
+        migrated.push(stableKey);
+      });
     });
 
     return { value: migrated, changed };
@@ -256,13 +328,36 @@ document.addEventListener('DOMContentLoaded', function () {
     }
 
     preferenceStorageArea.get(PINNED_PREF_KEYS, (syncRes) => {
-      const hasSyncData = PINNED_PREF_KEYS.some((key) => syncRes && syncRes[key] !== undefined);
-      if (hasSyncData) {
-        callback(syncRes || {}, false);
-        return;
-      }
-
-      chrome.storage.local.get(PINNED_PREF_KEYS, (localRes) => callback(localRes || {}, true));
+      chrome.storage.local.get([...PINNED_PREF_KEYS, PIN_MIGRATION_MARKER_KEY], (localRes) => {
+        loadedLegacyPinSeeds = Object.fromEntries(PINNED_PREF_KEYS.map((key) => [
+          key,
+          Array.isArray(syncRes?.[key]) ? syncRes[key].filter(isLegacyFolderPinKey) : []
+        ]));
+        migratedFolderPinKeys = new Set(Array.isArray(localRes?.[PIN_MIGRATION_MARKER_KEY])
+          ? localRes[PIN_MIGRATION_MARKER_KEY]
+          : []);
+        const hasSyncData = PINNED_PREF_KEYS.some((key) => syncRes && syncRes[key] !== undefined);
+        if (!hasSyncData) {
+          callback(localRes || {}, true);
+          return;
+        }
+        callback({
+          pinned_bookmarks: syncRes?.pinned_bookmarks === undefined
+            ? (localRes?.pinned_bookmarks || [])
+            : mergeUniquePinLists(
+              (Array.isArray(syncRes.pinned_bookmarks) ? syncRes.pinned_bookmarks : [])
+                .filter((entry) => !migratedFolderPinKeys.has(entry)),
+              localRes?.pinned_bookmarks
+            ),
+          frequent_order: syncRes?.frequent_order === undefined
+            ? (localRes?.frequent_order || [])
+            : mergeUniquePinLists(
+              (Array.isArray(syncRes.frequent_order) ? syncRes.frequent_order : [])
+                .filter((entry) => !migratedFolderPinKeys.has(entry)),
+              localRes?.frequent_order
+            )
+        }, false);
+      });
     });
   }
 
@@ -272,9 +367,24 @@ document.addEventListener('DOMContentLoaded', function () {
     };
 
     if (preferenceStorageArea !== chrome.storage.local) {
-      preferenceStorageArea.set(updates, () => {
-        chrome.storage.local.set(updates, done);
+      const activeKeys = new Set([...pinnedIds, ...frequentOrder]);
+      Object.values(loadedLegacyPinSeeds).flat().forEach((entry) => {
+        if (!activeKeys.has(entry)) migratedFolderPinKeys.add(entry);
       });
+      chrome.storage.local.set({
+        ...updates,
+        [PIN_MIGRATION_MARKER_KEY]: Array.from(migratedFolderPinKeys)
+      }, done);
+
+      const syncUpdates = {};
+      Object.entries(updates || {}).forEach(([key, value]) => {
+        const syncedValues = Array.isArray(value) ? value.filter((entry) => !isFolderPinKey(entry)) : [];
+        syncUpdates[key] = Array.from(new Set([
+          ...syncedValues,
+          ...(loadedLegacyPinSeeds[key] || [])
+        ]));
+      });
+      preferenceStorageArea.set(syncUpdates);
       return;
     }
 
@@ -288,13 +398,44 @@ document.addEventListener('DOMContentLoaded', function () {
     }
 
     preferenceStorageArea.get(CUSTOM_PREF_KEYS, (syncRes) => {
-      const hasSyncData = CUSTOM_PREF_KEYS.some((key) => syncRes && syncRes[key] !== undefined);
-      if (hasSyncData) {
-        callback(syncRes || {}, false);
-        return;
-      }
-
-      chrome.storage.local.get(CUSTOM_PREF_KEYS, (localRes) => callback(localRes || {}, true));
+      chrome.storage.local.get([...CUSTOM_PREF_KEYS, CUSTOM_MIGRATION_MARKER_KEY], (localRes) => {
+        loadedLegacyCustomSeeds = Object.fromEntries(CUSTOM_PREF_KEYS.map((key) => [
+          key,
+          Object.fromEntries(Object.entries(
+            syncRes?.[key] && typeof syncRes[key] === 'object' ? syncRes[key] : {}
+          ).filter(([entryKey]) => isLegacyFolderPinKey(entryKey)))
+        ]));
+        migratedFolderCustomKeys = new Set(Array.isArray(localRes?.[CUSTOM_MIGRATION_MARKER_KEY])
+          ? localRes[CUSTOM_MIGRATION_MARKER_KEY]
+          : []);
+        const hasSyncData = CUSTOM_PREF_KEYS.some((key) => syncRes && syncRes[key] !== undefined);
+        if (!hasSyncData) {
+          callback(localRes || {}, true);
+          return;
+        }
+        callback({
+          frequent_custom_titles: syncRes?.frequent_custom_titles === undefined
+            ? (localRes?.frequent_custom_titles || {})
+            : mergeCustomPreferenceMaps(
+              Object.fromEntries(Object.entries(
+                syncRes.frequent_custom_titles && typeof syncRes.frequent_custom_titles === 'object'
+                  ? syncRes.frequent_custom_titles
+                  : {}
+              ).filter(([key]) => !migratedFolderCustomKeys.has(key))),
+              localRes?.frequent_custom_titles
+            ),
+          frequent_custom_urls: syncRes?.frequent_custom_urls === undefined
+            ? (localRes?.frequent_custom_urls || {})
+            : mergeCustomPreferenceMaps(
+              Object.fromEntries(Object.entries(
+                syncRes.frequent_custom_urls && typeof syncRes.frequent_custom_urls === 'object'
+                  ? syncRes.frequent_custom_urls
+                  : {}
+              ).filter(([key]) => !migratedFolderCustomKeys.has(key))),
+              localRes?.frequent_custom_urls
+            )
+        }, false);
+      });
     });
   }
 
@@ -304,9 +445,27 @@ document.addEventListener('DOMContentLoaded', function () {
     };
 
     if (preferenceStorageArea !== chrome.storage.local) {
-      preferenceStorageArea.set(updates, () => {
-        chrome.storage.local.set(updates, done);
+      const activeKeys = new Set([
+        ...Object.keys(frequentCustomTitles),
+        ...Object.keys(frequentCustomUrls)
+      ]);
+      Object.values(loadedLegacyCustomSeeds).flatMap((map) => Object.keys(map)).forEach((entry) => {
+        if (!activeKeys.has(entry)) migratedFolderCustomKeys.add(entry);
       });
+      chrome.storage.local.set({
+        ...updates,
+        [CUSTOM_MIGRATION_MARKER_KEY]: Array.from(migratedFolderCustomKeys)
+      }, done);
+
+      const syncUpdates = {};
+      Object.entries(updates || {}).forEach(([key, value]) => {
+        const syncedValues = Object.fromEntries(
+          Object.entries((value && typeof value === 'object' && !Array.isArray(value)) ? value : {})
+            .filter(([entryKey]) => !isFolderPinKey(entryKey))
+        );
+        syncUpdates[key] = { ...syncedValues, ...(loadedLegacyCustomSeeds[key] || {}) };
+      });
+      preferenceStorageArea.set(syncUpdates);
       return;
     }
 
@@ -318,12 +477,22 @@ document.addEventListener('DOMContentLoaded', function () {
     const migrated = {};
     const seenLegacyKeys = new Set();
     let changed = false;
+    const { idToPinKey, aliasesByPinKey } = buildPinMaps(tree);
 
     function walk(nodes, parentPathTitles = []) {
       (nodes || []).forEach((node) => {
-        if (!node || node.id === '0') return;
+        if (!node) return;
+        if (node.id === '0') {
+          walk(node.children, parentPathTitles);
+          return;
+        }
 
-        const stableKey = getNodePinKey(node, parentPathTitles);
+        const stableKey = idToPinKey.get(String(node.id)) || getNodePinKey(node, parentPathTitles);
+        const folderAliases = node.url ? [] : (aliasesByPinKey.get(stableKey) || []);
+        const storedFolderAliases = folderAliases.filter((key) => (
+          Object.prototype.hasOwnProperty.call(source, key)
+        ));
+        const storedFolderAlias = storedFolderAliases[0] || '';
         const legacyDomainKey = node.url ? (() => {
           try {
             return new URL(node.url).hostname;
@@ -334,6 +503,12 @@ document.addEventListener('DOMContentLoaded', function () {
 
         if (stableKey && Object.prototype.hasOwnProperty.call(source, stableKey)) {
           migrated[stableKey] = source[stableKey];
+          storedFolderAliases.forEach((key) => seenLegacyKeys.add(key));
+          if (storedFolderAliases.length > 0) changed = true;
+        } else if (storedFolderAlias) {
+          migrated[stableKey] = source[storedFolderAlias];
+          seenLegacyKeys.add(storedFolderAlias);
+          changed = true;
         } else if (legacyDomainKey && Object.prototype.hasOwnProperty.call(source, legacyDomainKey)) {
           migrated[stableKey] = source[legacyDomainKey];
           seenLegacyKeys.add(legacyDomainKey);
@@ -351,6 +526,10 @@ document.addEventListener('DOMContentLoaded', function () {
     Object.keys(source).forEach((key) => {
       if (Object.prototype.hasOwnProperty.call(migrated, key)) return;
       if (seenLegacyKeys.has(key)) return;
+      if (isFolderPinKey(key)) {
+        changed = true;
+        return;
+      }
       if (!isStablePinKey(key)) {
         changed = true;
         return;
@@ -564,9 +743,9 @@ document.addEventListener('DOMContentLoaded', function () {
       return;
     }
     const { forceRefresh = false } = options;
-    const runCallback = (tree) => {
+    const runCallback = (tree, error = null) => {
       if (typeof callback === 'function') {
-        callback(Array.isArray(tree) ? tree : []);
+        callback(Array.isArray(tree) ? tree : null, error);
       }
     };
 
@@ -576,8 +755,8 @@ document.addEventListener('DOMContentLoaded', function () {
     }
 
     if (!forceRefresh && bookmarkTreeCacheFallback.inFlight) {
-      bookmarkTreeCacheFallback.inFlight.then((tree) => {
-        if (tree !== null) runCallback(tree);
+      bookmarkTreeCacheFallback.inFlight.then((result) => {
+        if (result !== null) runCallback(result.tree, result.error);
       });
       return;
     }
@@ -587,17 +766,24 @@ document.addEventListener('DOMContentLoaded', function () {
       chrome.bookmarks.getTree((tree) => {
         if (chrome.runtime.lastError) {
           console.warn('[Jade] Failed to get bookmark tree:', chrome.runtime.lastError.message);
-          resolve([]);
+          resolve({
+            tree: null,
+            error: new Error(chrome.runtime.lastError.message || 'Failed to read bookmark tree')
+          });
           return;
         }
-        resolve(tree);
+        if (!Array.isArray(tree)) {
+          resolve({ tree: null, error: new Error('Bookmark tree response is invalid') });
+          return;
+        }
+        resolve({ tree, error: null });
       });
     });
 
-    const currentRequest = request.then((tree) => {
+    const currentRequest = request.then((result) => {
       if (requestGeneration !== bookmarkTreeCacheFallback.generation) return null;
-      bookmarkTreeCacheFallback.data = tree;
-      return tree;
+      if (!result.error) bookmarkTreeCacheFallback.data = result.tree;
+      return result;
     }).finally(() => {
       if (bookmarkTreeCacheFallback.inFlight === currentRequest) {
         bookmarkTreeCacheFallback.inFlight = null;
@@ -605,8 +791,8 @@ document.addEventListener('DOMContentLoaded', function () {
     });
     bookmarkTreeCacheFallback.inFlight = currentRequest;
 
-    currentRequest.then((tree) => {
-      if (tree !== null) runCallback(tree);
+    currentRequest.then((result) => {
+      if (result !== null) runCallback(result.tree, result.error);
     });
   }
 
@@ -654,10 +840,15 @@ document.addEventListener('DOMContentLoaded', function () {
               schedulePersistDeadLinkProbeCache(800);
             }
 
-            getBookmarkTreeCached((tree) => {
-              const { idToPinKey } = buildPinMaps(tree);
-              const migratedPinned = migrateStoredPinList(pinRes.pinned_bookmarks, idToPinKey);
-              const migratedOrder = migrateStoredPinList(pinRes.frequent_order, idToPinKey);
+            getBookmarkTreeCached((tree, error) => {
+              if (error || !tree) {
+                const reason = error?.message || t('common.unknownError', null, 'Unknown error');
+                showToast(t('popup.toasts.bookmarkTreeReadFailed', { reason }, `Failed to read bookmarks: ${reason}`), { tone: 'error' });
+                return;
+              }
+              const { idToPinKey, legacyPinKeyAliases } = buildPinMaps(tree);
+              const migratedPinned = migrateStoredPinList(pinRes.pinned_bookmarks, idToPinKey, legacyPinKeyAliases);
+              const migratedOrder = migrateStoredPinList(pinRes.frequent_order, idToPinKey, legacyPinKeyAliases);
               const migratedCustomTitles = migrateCustomPreferenceMap(customRes.frequent_custom_titles, tree);
               const migratedCustomUrls = migrateCustomPreferenceMap(customRes.frequent_custom_urls, tree);
 
@@ -681,10 +872,13 @@ document.addEventListener('DOMContentLoaded', function () {
               }
 
               chrome.bookmarks.get('1', (nodes) => {
-                if (nodes && nodes.length > 0) {
+                if (!chrome.runtime.lastError && nodes && nodes.length > 0) {
                   const bookmarkBar = nodes[0];
                   navigationStack = [{ id: bookmarkBar.id, title: bookmarkBar.title || t('popup.bookmarkBar', null, 'Bookmark Bar') }];
                   buildDashboard();
+                } else {
+                  const reason = chrome.runtime.lastError?.message || t('common.unknownError', null, 'Unknown error');
+                  showToast(t('popup.toasts.bookmarkTreeReadFailed', { reason }, `Failed to read bookmarks: ${reason}`), { tone: 'error' });
                 }
               });
             });
@@ -697,6 +891,26 @@ document.addEventListener('DOMContentLoaded', function () {
   }
 
   function setupGlobalListeners() {
+    if (preferenceStorageArea !== chrome.storage.local && chrome.storage.onChanged) {
+      chrome.storage.onChanged.addListener((changes, areaName) => {
+        if (areaName !== 'sync') return;
+        PINNED_PREF_KEYS.forEach((key) => {
+          if (!changes[key]) return;
+          loadedLegacyPinSeeds[key] = Array.isArray(changes[key].newValue)
+            ? changes[key].newValue.filter(isLegacyFolderPinKey)
+            : [];
+        });
+        CUSTOM_PREF_KEYS.forEach((key) => {
+          if (!changes[key]) return;
+          const value = changes[key].newValue;
+          loadedLegacyCustomSeeds[key] = Object.fromEntries(
+            Object.entries(value && typeof value === 'object' ? value : {})
+              .filter(([entryKey]) => isLegacyFolderPinKey(entryKey))
+          );
+        });
+      });
+    }
+
     // 全局快捷键 Cmd+K / Ctrl+K 聚焦搜索框
     document.addEventListener('keydown', (e) => {
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
@@ -726,6 +940,7 @@ document.addEventListener('DOMContentLoaded', function () {
 
     // 点击任意地方收起菜单
     document.addEventListener('click', (e) => {
+      contextMenuRequestToken++;
       contextMenu.style.display = 'none';
     });
 
@@ -769,22 +984,23 @@ document.addEventListener('DOMContentLoaded', function () {
 
   // --- 仪表盘构建器 (启动器视图) ---
   function buildDashboard() {
+    const requestToken = ++navigationRequestToken;
     frequentSection.style.display = 'block';
     categorySection.style.display = 'block';
     bookmarkList.style.display = 'none';
     breadcrumb.style.display = 'none';
 
     // 1. Build Frequents (Top level folders or pinned items)
-    buildFrequents();
+    buildFrequents(requestToken);
 
     // 2. Build Recent Context
-    buildRecents();
+    buildRecents(requestToken);
 
     // 3. Build Category Cards (Folders mapping)
-    buildCategories();
+    buildCategories(requestToken);
   }
 
-  function buildFrequents() {
+  function buildFrequents(dashboardRequestToken = null) {
     frequentSection.style.display = 'block';
     frequentGrid.innerHTML = '';
 
@@ -946,18 +1162,40 @@ document.addEventListener('DOMContentLoaded', function () {
       });
     };
 
-    getBookmarkTreeCached((tree) => {
+    getBookmarkTreeCached((tree, error) => {
+      if (dashboardRequestToken !== null && dashboardRequestToken !== navigationRequestToken) return;
+      if (error || !tree) {
+        renderData([]);
+        return;
+      }
       let pinnedNodes = [];
-      function traverse(nodes, parentPathTitles = []) {
+      const { idToPinKey, legacyPinKeyAliases } = buildPinMaps(tree);
+      const migratedPinned = migrateStoredPinList(Array.from(pinnedIds), idToPinKey, legacyPinKeyAliases);
+      const migratedOrder = migrateStoredPinList(frequentOrder, idToPinKey, legacyPinKeyAliases);
+      const migratedCustomTitles = migrateCustomPreferenceMap(frequentCustomTitles, tree);
+      const migratedCustomUrls = migrateCustomPreferenceMap(frequentCustomUrls, tree);
+
+      let pinnedPreferencesChanged = migratedPinned.changed || migratedOrder.changed;
+      if (pinnedPreferencesChanged) {
+        pinnedIds = new Set(migratedPinned.value);
+        frequentOrder = migratedOrder.value;
+      }
+      if (migratedCustomTitles.changed || migratedCustomUrls.changed) {
+        frequentCustomTitles = migratedCustomTitles.value;
+        frequentCustomUrls = migratedCustomUrls.value;
+        saveCustomPreferences({
+          frequent_custom_titles: frequentCustomTitles,
+          frequent_custom_urls: frequentCustomUrls
+        });
+      }
+
+      function traverse(nodes) {
         nodes.forEach(n => {
-          const pinKey = getNodePinKey(n, parentPathTitles);
-          const nextPath = n.id === '0'
-            ? parentPathTitles
-            : parentPathTitles.concat(n.title || '');
+          const pinKey = idToPinKey.get(String(n.id)) || '';
           if (pinKey && pinnedIds.has(pinKey)) {
             pinnedNodes.push({ ...n, pinKey });
           }
-          if (n.children) traverse(n.children, nextPath);
+          if (n.children) traverse(n.children);
         });
       }
       traverse(tree);
@@ -967,8 +1205,20 @@ document.addEventListener('DOMContentLoaded', function () {
       const orphanIds = Array.from(pinnedIds).filter(id => !foundIds.has(id));
       if (orphanIds.length > 0) {
         orphanIds.forEach(id => pinnedIds.delete(id));
-        savePinnedPreferences({ pinned_bookmarks: Array.from(pinnedIds) });
+        pinnedPreferencesChanged = true;
         console.info(`[Jade] 已清理 ${orphanIds.length} 个无效置顶 ID:`, orphanIds);
+      }
+
+      const cleanedFrequentOrder = frequentOrder.filter((id) => pinnedIds.has(id));
+      if (cleanedFrequentOrder.length !== frequentOrder.length) {
+        frequentOrder = cleanedFrequentOrder;
+        pinnedPreferencesChanged = true;
+      }
+      if (pinnedPreferencesChanged) {
+        savePinnedPreferences({
+          pinned_bookmarks: Array.from(pinnedIds),
+          frequent_order: frequentOrder
+        });
       }
 
       const pinnedOrder = Array.from(pinnedIds);
@@ -999,12 +1249,13 @@ document.addEventListener('DOMContentLoaded', function () {
     });
   }
 
-  function buildRecents() {
+  function buildRecents(dashboardRequestToken = null) {
     recentListView.innerHTML = '';
     recentSection.style.display = 'none';
 
     // 聚合最近关闭的标签和最近历史记录
     chrome.sessions.getRecentlyClosed({ maxResults: 3 }, (sessions) => {
+      if (dashboardRequestToken !== null && dashboardRequestToken !== navigationRequestToken) return;
       const recentItems = [];
       if (sessions) {
         sessions.forEach(session => {
@@ -1021,6 +1272,7 @@ document.addEventListener('DOMContentLoaded', function () {
 
       // 补充历史记录
       chrome.history.search({ text: '', maxResults: 15, startTime: Date.now() - 24 * 3600 * 1000 }, (historyItems) => {
+        if (dashboardRequestToken !== null && dashboardRequestToken !== navigationRequestToken) return;
         const hItems = historyItems.filter(hi => !recentItems.find(ri => ri.url === hi.url)).map(hi => ({
           title: hi.title || hi.url,
           url: hi.url,
@@ -1074,7 +1326,7 @@ document.addEventListener('DOMContentLoaded', function () {
                        class="recent-favicon-img">
                 </div>
                 <div class="recent-info">
-                  <div class="recent-title" title="${escapeHtml(item.title)}">${escapeHtml(item.title)}</div>
+                  <div class="recent-title" title="${escapeHtmlAttr(item.title)}">${escapeHtml(item.title)}</div>
                   <div class="recent-meta">${escapeHtml(metaInfo)}</div>
                 </div>
             `;
@@ -1093,10 +1345,15 @@ document.addEventListener('DOMContentLoaded', function () {
     });
   }
 
-  function buildCategories() {
+  function buildCategories(dashboardRequestToken = null) {
     categoryGrid.innerHTML = '';
 
-    getBookmarkTreeCached((tree) => {
+    getBookmarkTreeCached((tree, error) => {
+      if (dashboardRequestToken !== null && dashboardRequestToken !== navigationRequestToken) return;
+      if (error || !tree || !tree[0] || !Array.isArray(tree[0].children)) {
+        categorySection.style.display = 'none';
+        return;
+      }
       const rootNodes = tree[0].children; // [Bookmarks Bar, Other Bookmarks]
       const folders = [];
       const rootBookmarks = [];
@@ -1109,7 +1366,7 @@ document.addEventListener('DOMContentLoaded', function () {
               // 记录根目录下的直属书签
               rootBookmarks.push({ ...child, parentTitle: rootNode.title || t('popup.rootFolder', null, 'Root') });
             } else {
-              folders.push(child);
+              folders.push({ ...child, parentTitle: rootNode.title || t('popup.rootFolder', null, 'Root') });
             }
           });
         }
@@ -1168,7 +1425,7 @@ document.addEventListener('DOMContentLoaded', function () {
     card.innerHTML = `
             <div class="cat-header-row">
                 <div class="cat-title-group">
-                    <span class="cat-title" title="${escapeHtml(folder.title)}">${escapeHtml(folder.title)}</span>
+                    <span class="cat-title" title="${escapeHtmlAttr(folder.title)}">${escapeHtml(folder.title)}</span>
                 </div>
                 <span class="cat-count-badge">${folder.children.length}</span>
             </div>
@@ -1191,11 +1448,7 @@ document.addEventListener('DOMContentLoaded', function () {
     // Context menu
     if (!folder.isUncategorized) card.addEventListener('contextmenu', (e) => {
       e.preventDefault();
-      targetNodeId = folder.id;
-      targetNodeIsFolder = true;
-      targetNodePinKey = getItemPinKey(folder);
-      targetFrequentKey = null;
-      showContextMenu(e, true);
+      showBookmarkNodeContextMenu(e, folder, true);
     });
 
     categoryGrid.appendChild(card);
@@ -1239,10 +1492,9 @@ document.addEventListener('DOMContentLoaded', function () {
   }
 
   // --- 标准文件夹导航 ---
-  function enterFolder(id, title, isUncategorized = false) {
+  function showFolderContent(id, title, isUncategorized) {
     isSearching = false;
     searchInput.value = '';
-    navigationStack.push({ id, title, isUncategorized });
 
     frequentSection.style.display = 'none';
     recentSection.style.display = 'none';
@@ -1253,11 +1505,52 @@ document.addEventListener('DOMContentLoaded', function () {
     loadStandardFolder(id, isUncategorized);
   }
 
+  function enterFolder(id, title, isUncategorized = false) {
+    const requestToken = ++navigationRequestToken;
+
+    if (isUncategorized) {
+      const dashboardRoot = navigationStack[0] || { id: '1', title: t('popup.bookmarkBar', null, 'Bookmark Bar') };
+      navigationStack = [dashboardRoot, { id, title, isUncategorized: true }];
+      showFolderContent(id, title, true);
+      return;
+    }
+
+    getBookmarkTreeCached((tree, error) => {
+      if (requestToken !== navigationRequestToken) return;
+      if (error || !tree) {
+        const reason = error?.message || t('common.unknownError', null, 'Unknown error');
+        showToast(t('popup.toasts.bookmarkTreeReadFailed', { reason }, `Failed to read bookmarks: ${reason}`), { tone: 'error' });
+        return;
+      }
+
+      const path = bookmarkService && typeof bookmarkService.findBookmarkNodePath === 'function'
+        ? bookmarkService.findBookmarkNodePath(tree, id)
+        : [];
+      if (path.length === 0) {
+        showToast(t('popup.toasts.bookmarkFolderMissing', null, 'This folder no longer exists'), { tone: 'error' });
+        return;
+      }
+
+      navigationStack = path.map((node) => ({
+        id: node.id,
+        title: node.title || t('common.untitledFolder', null, 'Untitled folder'),
+        isUncategorized: false
+      }));
+      showFolderContent(id, title, false);
+    });
+  }
+
   function loadStandardFolder(id, isUncategorized = false) {
+    const requestToken = ++navigationRequestToken;
     currentFolderId = id;
 
     if (isUncategorized) {
-      getBookmarkTreeCached((tree) => {
+      getBookmarkTreeCached((tree, error) => {
+        if (requestToken !== navigationRequestToken) return;
+        if (error || !tree) {
+          bookmarkList.innerHTML = `<div class="empty-state">${escapeHtml(t('popup.errors.bookmarkTreeUnavailable', null, 'Bookmarks are temporarily unavailable'))}</div>`;
+          return;
+        }
         const rootNodes = tree && tree[0] && Array.isArray(tree[0].children) ? tree[0].children : [];
         const rootBookmarks = [];
         // 汇集所有的根目录直属书签
@@ -1277,6 +1570,7 @@ document.addEventListener('DOMContentLoaded', function () {
     }
 
     chrome.bookmarks.getChildren(id, (children) => {
+      if (requestToken !== navigationRequestToken) return;
       if (chrome.runtime.lastError || !Array.isArray(children)) {
         if (navigationStack.length > 1) navigationStack.pop();
         const parent = navigationStack[navigationStack.length - 1];
@@ -1317,8 +1611,9 @@ document.addEventListener('DOMContentLoaded', function () {
     backBtn.innerHTML = `<svg class="inline-back-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="15 18 9 12 15 6"></polyline></svg> ${escapeHtml(t('popup.backButton', null, 'Back'))}`;
 
     // 允许拖放到“返回”按钮上 (移动到上一级)
+    const currentNavigation = navigationStack[navigationStack.length - 1] || {};
     const parentNode = navigationStack.length > 1 ? navigationStack[navigationStack.length - 2] : null; // 上一级目录 (或 undefined 当返回首页时不支持)
-    if (parentNode && parentNode.id !== '0') {
+    if (!currentNavigation.isUncategorized && parentNode && parentNode.id !== '0') {
       backBtn.addEventListener('dragover', (e) => { e.preventDefault(); backBtn.classList.add('drag-over'); e.dataTransfer.dropEffect = 'move'; });
       backBtn.addEventListener('dragleave', () => backBtn.classList.remove('drag-over'));
       backBtn.addEventListener('drop', (e) => {
@@ -1394,6 +1689,7 @@ document.addEventListener('DOMContentLoaded', function () {
     }
 
     const requestToken = ++searchRequestToken;
+    navigationRequestToken++;
     isSearching = true;
     frequentSection.style.display = 'none';
     recentSection.style.display = 'none';
@@ -1530,15 +1826,19 @@ document.addEventListener('DOMContentLoaded', function () {
       a.addEventListener('contextmenu', (e) => {
         if (item.meta) return; // Don't show menu for sessions/history injected items in search
         e.preventDefault();
-        targetNodeId = item.id;
-        targetNodeIsFolder = isFolder;
-        targetNodePinKey = getItemPinKey(item, getCurrentFolderPathTitles());
-        targetFrequentKey = null;
-        showContextMenu(e, isFolder);
+        showBookmarkNodeContextMenu(e, item, isFolder);
       });
 
+      const currentNavigation = navigationStack[navigationStack.length - 1] || {};
+      const canReorder = bookmarkService && typeof bookmarkService.canReorderBookmarkList === 'function'
+        ? bookmarkService.canReorderBookmarkList({
+          isSearchResult,
+          isUncategorized: !!currentNavigation.isUncategorized
+        })
+        : (!isSearchResult && !currentNavigation.isUncategorized);
+
       // 拖拽排序逻辑 (仅在非搜索的真实文件夹内生效)
-      if (!isSearchResult && item.id) {
+      if (canReorder && item.id) {
         a.draggable = true;
 
         a.addEventListener('dragstart', (e) => {
@@ -1601,7 +1901,6 @@ document.addEventListener('DOMContentLoaded', function () {
 
           // 场景 2: 同级之间重新排序
           const itemsArray = Array.from(bookmarkList.children);
-          const draggedIndex = itemsArray.indexOf(draggedItem);
           const dropIndex = itemsArray.indexOf(a);
 
           chrome.bookmarks.move(draggedItemId, {
@@ -1752,6 +2051,18 @@ document.addEventListener('DOMContentLoaded', function () {
 
   function setToolsResultMessage(message, tone = 'muted') {
     toolsResultList.innerHTML = `<div class="tool-result-message tool-result-${tone}">${escapeHtml(String(message || ''))}</div>`;
+  }
+
+  function showBookmarkTreeToolError(error, button, retryText) {
+    const reason = error?.message || t('common.unknownError', null, 'Unknown error');
+    const message = t('popup.tools.bookmarkTreeReadFailed', { reason }, `Unable to read bookmarks: ${reason}`);
+    setToolDetailStatusText(message, 'error', true);
+    setToolsResultMessage(message, 'error');
+    if (button) {
+      button.disabled = false;
+      button.textContent = retryText || t('common.retry', null, 'Retry');
+      button.className = 'tool-btn tool-btn-secondary';
+    }
   }
 
   let undoTimeout = null;
@@ -2143,7 +2454,42 @@ document.addEventListener('DOMContentLoaded', function () {
   }
 
   // --- 右键菜单与模态框处理 ---
+  function showBookmarkNodeContextMenu(event, item, isFolder) {
+    const requestToken = ++contextMenuRequestToken;
+    contextMenu.style.display = 'none';
+    const menuEvent = {
+      clientX: event.clientX,
+      clientY: event.clientY
+    };
+    if (!isFolder) {
+      targetNodeId = item.id;
+      targetNodeIsFolder = false;
+      targetNodeDomain = null;
+      targetFrequentKey = null;
+      targetNodePinKey = getBookmarkPinKey(item.url);
+      showContextMenu(menuEvent, false);
+      return;
+    }
+
+    getBookmarkTreeCached((tree, error) => {
+      if (requestToken !== contextMenuRequestToken) return;
+      if (error || !tree) {
+        const reason = error?.message || t('common.unknownError', null, 'Unknown error');
+        showToast(t('popup.toasts.bookmarkTreeReadFailed', { reason }, `Failed to read bookmarks: ${reason}`), { tone: 'error' });
+        return;
+      }
+      const { idToPinKey } = buildPinMaps(tree);
+      targetNodeId = item.id;
+      targetNodeIsFolder = true;
+      targetNodeDomain = null;
+      targetFrequentKey = null;
+      targetNodePinKey = idToPinKey.get(String(item.id)) || '';
+      showContextMenu(menuEvent, true);
+    });
+  }
+
   function showContextMenu(e, isFolder, isFrequent = false, isRecent = false) {
+    contextMenuRequestToken++;
     const visibility = contextMenuModule && contextMenuModule.resolveVisibility
       ? contextMenuModule.resolveVisibility({
         isFolder,
@@ -2240,8 +2586,14 @@ document.addEventListener('DOMContentLoaded', function () {
       }
 
       const sourceParentId = String(nodes[0].parentId || '');
-      getBookmarkTreeCached((tree) => {
+      getBookmarkTreeCached((tree, error) => {
         if (movingBookmarkId !== bookmarkId) return;
+        if (error || !tree) {
+          const reason = error?.message || t('common.unknownError', null, 'Unknown error');
+          closeMoveModal();
+          showToast(t('popup.toasts.bookmarkMoveFailed', { reason }, `Move failed: ${reason}`), { tone: 'error' });
+          return;
+        }
 
         const folders = getAvailableBookmarkFolders(tree);
         let firstDestinationId = '';
@@ -2480,7 +2832,12 @@ document.addEventListener('DOMContentLoaded', function () {
   }
 
   function sortChildren(folderId, type) {
-    chrome.bookmarks.getChildren(folderId, (children) => {
+    chrome.bookmarks.getChildren(folderId, async (children) => {
+      if (chrome.runtime.lastError || !Array.isArray(children)) {
+        const reason = chrome.runtime.lastError?.message || t('common.unknownError', null, 'Unknown error');
+        showToast(t('popup.toasts.bookmarkSortFailed', { reason }, `Sort failed: ${reason}`), { tone: 'error' });
+        return;
+      }
       let sorted = [...children];
       if (type === 'name') {
         sorted.sort((a, b) => (a.title || '').localeCompare(b.title || ''));
@@ -2488,13 +2845,19 @@ document.addEventListener('DOMContentLoaded', function () {
         sorted.sort((a, b) => (b.dateAdded || 0) - (a.dateAdded || 0));
       }
 
-      let p = Promise.resolve();
-      sorted.forEach((child, i) => {
-        p = p.then(() => new Promise(res => {
-          chrome.bookmarks.move(child.id, { parentId: folderId, index: i }, res);
-        }));
-      });
-      p.then(refreshView);
+      try {
+        for (let i = 0; i < sorted.length; i++) {
+          const child = sorted[i];
+          await runChromeBookmarkMutation((done) => {
+            chrome.bookmarks.move(child.id, { parentId: folderId, index: i }, done);
+          });
+        }
+        refreshView();
+      } catch (error) {
+        const reason = getErrorMessage(error, t('common.unknownError', null, 'Unknown error'));
+        refreshView();
+        showToast(t('popup.toasts.bookmarkSortFailed', { reason }, `Sort failed: ${reason}`), { tone: 'error' });
+      }
     });
   }
 
@@ -2545,7 +2908,11 @@ document.addEventListener('DOMContentLoaded', function () {
     toolDetailFooter.innerHTML = '';
     setToolsResultMessage(t('popup.tools.statusRunning', null, 'Working...'));
 
-    getBookmarkTreeCached((tree) => {
+    getBookmarkTreeCached((tree, error) => {
+      if (error || !tree) {
+        showBookmarkTreeToolError(error, btn, t('popup.tools.duplicatesRescan', null, 'Scan Again'));
+        return;
+      }
       const duplicateGroups = toolsModule && typeof toolsModule.collectDuplicateUrlGroups === 'function'
         ? toolsModule.collectDuplicateUrlGroups(tree)
         : [];
@@ -2573,7 +2940,7 @@ document.addEventListener('DOMContentLoaded', function () {
           const shouldCheck = nIdx > 0;
           html += `<div class="tool-check-item">
                                         <input type="checkbox" class="duplicate-checkbox" data-id="${node.id}" ${shouldCheck ? 'checked' : ''}>
-                                        <span class="tool-check-label" title="${escapeHtml(node.title)}">${escapeHtml(node.title || t('common.untitled', null, 'Untitled'))}</span>
+                                        <span class="tool-check-label" title="${escapeHtmlAttr(node.title)}">${escapeHtml(node.title || t('common.untitled', null, 'Untitled'))}</span>
                                        </div>`;
         });
         html += `</div>`;
@@ -2858,7 +3225,11 @@ document.addEventListener('DOMContentLoaded', function () {
           btn.textContent = t('popup.tools.statusRunning', null, 'Working...');
           setToolDetailStatusText(t('popup.tools.statsCollecting', null, 'Running: collecting data...'));
 
-          getBookmarkTreeCached((tree) => {
+          getBookmarkTreeCached((tree, error) => {
+            if (error || !tree) {
+              showBookmarkTreeToolError(error, btn, t('popup.tools.statsStart', null, 'Analyze'));
+              return;
+            }
             const stats = toolsModule && typeof toolsModule.analyzeBookmarkStats === 'function'
               ? toolsModule.analyzeBookmarkStats(tree)
               : getDefaultBookmarkStats();
@@ -2927,7 +3298,11 @@ document.addEventListener('DOMContentLoaded', function () {
             btn.className = 'tool-btn tool-btn-secondary';
           };
 
-          getBookmarkTreeCached(async (tree) => {
+          getBookmarkTreeCached(async (tree, error) => {
+            if (error || !tree) {
+              showBookmarkTreeToolError(error, btn, t('popup.tools.brokenRetry', null, 'Check Again'));
+              return;
+            }
             const links = toolsModule.collectHttpLinks(tree);
             let completedCount = 0;
             const totalCount = links.length;
@@ -3020,7 +3395,7 @@ document.addEventListener('DOMContentLoaded', function () {
                 const reason = getBrokenProbeReasonLabel(b.probe);
                 html += `<div class="tool-check-item">
                           <input type="checkbox" class="broken-checkbox" data-id="${b.node.id}" checked>
-                          <span class="tool-check-label" title="${escapeHtml(b.node.url)}">❌ ${escapeHtml(b.node.title || t('common.untitled', null, 'Untitled'))}</span>
+                          <span class="tool-check-label" title="${escapeHtmlAttr(b.node.url)}">❌ ${escapeHtml(b.node.title || t('common.untitled', null, 'Untitled'))}</span>
                          </div>
                          <div class="tool-check-url tool-check-url-error">${escapeHtml(b.node.url)}<br>[${escapeHtml(reason)}]</div>`;
               });
@@ -3033,7 +3408,7 @@ document.addEventListener('DOMContentLoaded', function () {
                 const reason = getBrokenProbeReasonLabel(u.probe);
                 html += `<div class="tool-check-item">
                           <input type="checkbox" class="broken-checkbox" data-id="${u.node.id}">
-                          <span class="tool-check-label" title="${escapeHtml(u.node.url)}">⚠️ ${escapeHtml(u.node.title || t('common.untitled', null, 'Untitled'))}</span>
+                          <span class="tool-check-label" title="${escapeHtmlAttr(u.node.url)}">⚠️ ${escapeHtml(u.node.title || t('common.untitled', null, 'Untitled'))}</span>
                          </div>
                          <div class="tool-check-url tool-check-url-warn">${escapeHtml(u.node.url)}<br>[${escapeHtml(reason)}]</div>`;
               });
@@ -3093,7 +3468,11 @@ document.addEventListener('DOMContentLoaded', function () {
           setToolDetailStatusText(t('popup.tools.emptyFoldersScanning', null, 'Running: scanning structure...'));
           setToolsResultMessage(t('popup.tools.statusRunning', null, 'Working...'));
 
-          getBookmarkTreeCached((tree) => {
+          getBookmarkTreeCached((tree, error) => {
+            if (error || !tree) {
+              showBookmarkTreeToolError(error, btn, t('popup.tools.duplicatesRescan', null, 'Scan Again'));
+              return;
+            }
             const emptyFolders = toolsModule && typeof toolsModule.collectLeafEmptyFolders === 'function'
               ? toolsModule.collectLeafEmptyFolders(tree)
               : [];
@@ -3117,7 +3496,7 @@ document.addEventListener('DOMContentLoaded', function () {
             emptyFolders.forEach((node) => {
               html += `<div class="tool-check-item">
                         <input type="checkbox" class="empty-folder-checkbox" data-id="${node.id}" checked>
-                        <span class="tool-check-label" title="${escapeHtml(node.title)}">📁 ${escapeHtml(node.title || t('common.untitled', null, 'Untitled'))}</span>
+                        <span class="tool-check-label" title="${escapeHtmlAttr(node.title)}">📁 ${escapeHtml(node.title || t('common.untitled', null, 'Untitled'))}</span>
                        </div>`;
             });
             html += `</div>`;
@@ -3256,7 +3635,11 @@ document.addEventListener('DOMContentLoaded', function () {
 
   // --- EXPORT HANDLE (HTML) ---
   function handleExportBookmarks(btn) {
-    getBookmarkTreeCached((tree) => {
+    getBookmarkTreeCached((tree, error) => {
+      if (error || !tree || !tree[0]) {
+        showBookmarkTreeToolError(error, btn, t('popup.tools.exportRetry', null, 'Export Again'));
+        return;
+      }
       let htmlContent = `<!DOCTYPE NETSCAPE-Bookmark-file-1>
 <!-- This is an automatically generated file.
      It will be read and overwritten.

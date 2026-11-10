@@ -75,7 +75,13 @@
           bookmarkEditDone: '书签已更新',
           bookmarkEditFailed: '编辑失败：{{reason}}',
           bookmarkMoveDone: '书签已移动',
-          bookmarkMoveFailed: '移动失败：{{reason}}'
+          bookmarkMoveFailed: '移动失败：{{reason}}',
+          bookmarkSortFailed: '排序失败：{{reason}}',
+          bookmarkTreeReadFailed: '读取书签失败：{{reason}}',
+          bookmarkFolderMissing: '此文件夹已不存在'
+        },
+        errors: {
+          bookmarkTreeUnavailable: '书签暂时不可用'
         },
         move: {
           title: '移动到文件夹',
@@ -265,6 +271,7 @@
           cleanFailedReason: '未知书签错误',
           cleanRunning: '清理中...',
           statusRunning: '处理中...',
+          bookmarkTreeReadFailed: '无法读取书签：{{reason}}',
           cleanLibrary: '🎉 您的书签库非常整洁！'
         },
         reasons: {
@@ -396,7 +403,13 @@
           bookmarkEditDone: 'Bookmark updated',
           bookmarkEditFailed: 'Edit failed: {{reason}}',
           bookmarkMoveDone: 'Bookmark moved',
-          bookmarkMoveFailed: 'Move failed: {{reason}}'
+          bookmarkMoveFailed: 'Move failed: {{reason}}',
+          bookmarkSortFailed: 'Sort failed: {{reason}}',
+          bookmarkTreeReadFailed: 'Failed to read bookmarks: {{reason}}',
+          bookmarkFolderMissing: 'This folder no longer exists'
+        },
+        errors: {
+          bookmarkTreeUnavailable: 'Bookmarks are temporarily unavailable'
         },
         move: {
           title: 'Move to Folder',
@@ -586,6 +599,7 @@
           cleanFailedReason: 'Unknown bookmark error',
           cleanRunning: 'Deleting...',
           statusRunning: 'Working...',
+          bookmarkTreeReadFailed: 'Unable to read bookmarks: {{reason}}',
           cleanLibrary: '🎉 Your bookmark library is very clean!'
         },
         reasons: {

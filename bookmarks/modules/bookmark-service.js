@@ -53,9 +53,9 @@
     function getTreeCached(callback, options) {
       const opts = options || {};
       const forceRefresh = !!opts.forceRefresh;
-      const runCallback = (tree) => {
+      const runCallback = (tree, error = null) => {
         if (typeof callback === 'function') {
-          callback(Array.isArray(tree) ? tree : []);
+          callback(Array.isArray(tree) ? tree : null, error);
         }
       };
 
@@ -65,8 +65,8 @@
       }
 
       if (!forceRefresh && cache.inFlight) {
-        cache.inFlight.then((tree) => {
-          if (tree !== null) runCallback(tree);
+        cache.inFlight.then((result) => {
+          if (result !== null) runCallback(result.tree, result.error);
         });
         return;
       }
@@ -75,24 +75,31 @@
       const request = new Promise((resolve) => {
         chromeApi.bookmarks.getTree((tree) => {
           if (chromeApi.runtime && chromeApi.runtime.lastError) {
-            resolve([]);
+            resolve({
+              tree: null,
+              error: new Error(chromeApi.runtime.lastError.message || 'Failed to read bookmark tree')
+            });
             return;
           }
-          resolve(tree);
+          if (!Array.isArray(tree)) {
+            resolve({ tree: null, error: new Error('Bookmark tree response is invalid') });
+            return;
+          }
+          resolve({ tree, error: null });
         });
       });
 
-      const currentRequest = request.then((tree) => {
+      const currentRequest = request.then((result) => {
         if (requestGeneration !== cache.generation) return null;
-        cache.data = tree;
-        return tree;
+        if (!result.error) cache.data = result.tree;
+        return result;
       }).finally(() => {
         if (cache.inFlight === currentRequest) cache.inFlight = null;
       });
       cache.inFlight = currentRequest;
 
-      currentRequest.then((tree) => {
-        if (tree !== null) runCallback(tree);
+      currentRequest.then((result) => {
+        if (result !== null) runCallback(result.tree, result.error);
       });
     }
 
@@ -101,6 +108,141 @@
       setupInvalidation,
       getTreeCached
     };
+  }
+
+  function findBookmarkNodePath(tree, targetId) {
+    const expectedId = String(targetId || '');
+    if (!expectedId) return [];
+
+    function walk(nodes, path) {
+      for (const node of (Array.isArray(nodes) ? nodes : [])) {
+        if (!node || node.url) continue;
+        const nextPath = node.id === '0' ? path : path.concat(node);
+        if (String(node.id) === expectedId) return nextPath;
+        const found = walk(node.children, nextPath);
+        if (found.length > 0) return found;
+      }
+      return [];
+    }
+
+    return walk(tree, []);
+  }
+
+  function isFolderPinKey(value) {
+    return typeof value === 'string'
+      && (value.startsWith('folder:')
+        || value.startsWith('folder-v2:')
+        || value.startsWith('folder-id:'));
+  }
+
+  function mergeSyncedAndLocalPinLists(primary, local) {
+    const synced = Array.from(new Set(Array.isArray(primary) ? primary : []));
+    const localList = Array.isArray(local) ? local : [];
+    let syncedIndex = 0;
+    const merged = [];
+    localList.forEach((entry) => {
+      if (isFolderPinKey(entry)) {
+        merged.push(entry);
+      } else if (syncedIndex < synced.length) {
+        merged.push(synced[syncedIndex++]);
+      }
+    });
+    while (syncedIndex < synced.length) merged.push(synced[syncedIndex++]);
+    return Array.from(new Set(merged));
+  }
+
+  function mergeSyncedAndLocalPreferenceMaps(primary, local) {
+    const merged = { ...((primary && typeof primary === 'object') ? primary : {}) };
+    Object.entries((local && typeof local === 'object') ? local : {}).forEach(([key, value]) => {
+      if (isFolderPinKey(key)) merged[key] = value;
+    });
+    return merged;
+  }
+
+  function buildFolderPinMetadata(tree) {
+    const idToPinKey = new Map();
+    const legacyAliases = new Map();
+    const aliasesByPinKey = new Map();
+    const normalize = (value) => String(value || '')
+      .trim()
+      .replace(/\s+/g, ' ')
+      .toLowerCase();
+    const addAlias = (alias, stableKey) => {
+      if (!alias || alias === stableKey) return;
+      const targets = legacyAliases.get(alias) || [];
+      if (!targets.includes(stableKey)) targets.push(stableKey);
+      legacyAliases.set(alias, targets);
+      const aliases = aliasesByPinKey.get(stableKey) || [];
+      if (!aliases.includes(alias)) aliases.push(alias);
+      aliasesByPinKey.set(stableKey, aliases);
+    };
+
+    function walk(nodes, parentSegments) {
+      const list = Array.isArray(nodes) ? nodes : [];
+      list.forEach((node) => {
+        if (!node || node.url) return;
+        if (node.id === '0') {
+          walk(node.children, parentSegments);
+          return;
+        }
+
+        const baseSegment = normalize(node.title);
+        const pathSegments = parentSegments.concat(baseSegment);
+        const stableKey = `folder-id:${encodeURIComponent(String(node.id))}`;
+        idToPinKey.set(String(node.id), stableKey);
+
+        const legacySegments = pathSegments.filter(Boolean);
+        if (legacySegments.length > 0) {
+          const legacyKey = `folder:${legacySegments.join('/')}`;
+          addAlias(legacyKey, stableKey);
+        }
+        walk(node.children, pathSegments);
+      });
+    }
+
+    walk(tree, []);
+    return { idToPinKey, legacyAliases, aliasesByPinKey };
+  }
+
+  function buildFolderPinKeyMap(tree) {
+    return buildFolderPinMetadata(tree).idToPinKey;
+  }
+
+  function migrateStoredPinList(list, idToPinKey, legacyPinKeyAliases) {
+    const migrated = [];
+    const seen = new Set();
+    let changed = false;
+    const isStablePinKey = (value) => typeof value === 'string'
+      && (value.startsWith('url:')
+        || value.startsWith('folder:')
+        || value.startsWith('folder-v2:')
+        || value.startsWith('folder-id:'));
+
+    (Array.isArray(list) ? list : []).forEach((entry) => {
+      let stableKeys = [];
+      if (isStablePinKey(entry)) {
+        stableKeys = legacyPinKeyAliases.get(entry) || [entry];
+        if (stableKeys.length !== 1 || stableKeys[0] !== entry) changed = true;
+      } else if (idToPinKey.has(String(entry))) {
+        stableKeys = [idToPinKey.get(String(entry))];
+        changed = true;
+      } else {
+        changed = true;
+      }
+
+      stableKeys.forEach((stableKey) => {
+        if (!stableKey || seen.has(stableKey)) return;
+        seen.add(stableKey);
+        migrated.push(stableKey);
+      });
+    });
+
+    return { value: migrated, changed };
+  }
+
+  function canReorderBookmarkList(options) {
+    const opts = options || {};
+    return !opts.isSearchResult && !opts.isUncategorized;
   }
 
   function readFileAsText(file) {
@@ -279,6 +421,14 @@
   global.JadeModules = global.JadeModules || {};
   global.JadeModules.bookmarkService = {
     createTreeCache,
+    findBookmarkNodePath,
+    isFolderPinKey,
+    mergeSyncedAndLocalPinLists,
+    mergeSyncedAndLocalPreferenceMaps,
+    buildFolderPinMetadata,
+    buildFolderPinKeyMap,
+    migrateStoredPinList,
+    canReorderBookmarkList,
     readFileAsText,
     parseImportedHtmlBookmarks,
     countImportableNodes,

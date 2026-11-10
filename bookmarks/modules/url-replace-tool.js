@@ -178,7 +178,20 @@
         toolDetailFooter.style.display = 'none';
 
         setTimeout(() => {
-          getBookmarkTreeCached((tree) => {
+          getBookmarkTreeCached((tree, error) => {
+            if (error || !tree) {
+              findInput.disabled = false;
+              replaceInput.disabled = false;
+              previewBtn.disabled = false;
+              previewBtn.textContent = t('popup.tools.batchReplacePreview', null, 'Preview Changes');
+              statusArea.style.color = '#ff3b30';
+              statusText.textContent = t(
+                'popup.tools.bookmarkTreeReadFailed',
+                { reason: getFailureReason(error) },
+                `Unable to read bookmarks: ${getFailureReason(error)}`
+              );
+              return;
+            }
             const matches = [];
             function traverse(nodes) {
               nodes.forEach((node) => {

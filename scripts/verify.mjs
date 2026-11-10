@@ -4,6 +4,7 @@ import vm from 'node:vm';
 
 const manifest = JSON.parse(fs.readFileSync('manifest.json', 'utf8'));
 assert.match(String(manifest.version || ''), /^\d+(?:\.\d+){0,2}$/, 'manifest version must be a numeric extension version');
+assert.equal(manifest.version, '1.6.0', 'manifest version must match the current release');
 assert.ok(
   Array.isArray(manifest.optional_host_permissions) && manifest.optional_host_permissions.includes('<all_urls>'),
   'broken-link scans must declare optional website access'
@@ -24,6 +25,9 @@ assert.ok(workflow.includes("if: github.event_name == 'workflow_dispatch'"), 'pa
 const readme = fs.readFileSync('README.md', 'utf8');
 assert.ok(!readme.includes('Unsplash'), 'README wallpaper provider copy must match implemented providers');
 
+const changelog = fs.readFileSync('CHANGELOG.md', 'utf8');
+assert.ok(changelog.includes('Bumped the extension version to `1.6.0`.'), 'changelog must match the manifest version');
+
 const i18nSource = fs.readFileSync('shared/i18n.js', 'utf8');
 assert.ok(!i18nSource.includes('自动创建书签备份'), 'tool warnings must not promise automatic backups');
 assert.ok(!i18nSource.includes('A bookmark backup is created before'), 'tool warnings must not promise automatic backups in English');
@@ -40,6 +44,7 @@ assert.ok(
 );
 assert.ok(popupSource.includes('showContextMenu(e, isFolder, true)'), 'pinned folders must open the folder context menu');
 assert.ok(popupSource.includes("chrome.bookmarks.move(bookmarkId, { parentId }"), 'bookmarks must support moving to a selected folder');
+assert.ok(!/title="\$\{escapeHtml\(/.test(popupSource), 'HTML attributes must use attribute escaping');
 
 const context = {
   window: {},
@@ -85,7 +90,30 @@ assert.equal(typeof tools?.collectLeafEmptyFolders, 'function', 'empty folder sc
 assert.equal(typeof tools?.analyzeBookmarkStats, 'function', 'stats helper must be exported');
 assert.equal(typeof bookmarkService?.createTreeCache, 'function', 'bookmark tree cache helper must be exported');
 assert.equal(typeof bookmarkService?.collectBookmarkFolders, 'function', 'bookmark folder collector must be exported');
+assert.equal(typeof bookmarkService?.findBookmarkNodePath, 'function', 'bookmark path resolver must be exported');
+assert.equal(typeof bookmarkService?.mergeSyncedAndLocalPinLists, 'function', 'pin preference merge helper must be exported');
+assert.equal(typeof bookmarkService?.mergeSyncedAndLocalPreferenceMaps, 'function', 'custom preference merge helper must be exported');
+assert.equal(typeof bookmarkService?.buildFolderPinMetadata, 'function', 'folder pin metadata builder must be exported');
+assert.equal(typeof bookmarkService?.buildFolderPinKeyMap, 'function', 'folder pin-key builder must be exported');
+assert.equal(typeof bookmarkService?.migrateStoredPinList, 'function', 'stored pin migration helper must be exported');
+assert.equal(typeof bookmarkService?.canReorderBookmarkList, 'function', 'bookmark reorder policy must be exported');
 assert.equal(typeof contextMenu?.resolveVisibility, 'function', 'context menu visibility helper must be exported');
+assert.equal(
+  JSON.stringify(bookmarkService.mergeSyncedAndLocalPinLists(
+    ['url:b', 'url:a'],
+    ['folder-id:f', 'url:a', 'url:b']
+  )),
+  JSON.stringify(['folder-id:f', 'url:b', 'url:a']),
+  'synced URL order must fill local URL slots without moving local folder pins'
+);
+assert.equal(
+  JSON.stringify(bookmarkService.mergeSyncedAndLocalPreferenceMaps(
+    { 'url:a': 'Synced A' },
+    { 'url:a': 'Local A', 'folder-id:f': 'Local Folder' }
+  )),
+  JSON.stringify({ 'url:a': 'Synced A', 'folder-id:f': 'Local Folder' }),
+  'synced URL preferences and local folder preferences must remain isolated'
+);
 assert.deepEqual(
   Object.keys(contextMenu.resolveVisibility({ isRecent: true, pinnedIds: new Set() })).sort(),
   ['pinText', 'showDelete', 'showDivider', 'showEdit', 'showMove', 'showPin', 'showRemoveRecent', 'showSortName', 'showSortTime'].sort(),
@@ -166,6 +194,35 @@ pendingTreeCache.getTreeCached(() => {});
 assert.equal(pendingTreeRequestCount, 2, 'cache invalidation must not reuse a pre-change tree request');
 pendingTreeCallbacks.forEach((callback) => callback([{ id: '0', children: [] }]));
 
+let failedTreeRequestCount = 0;
+const failedTreeChromeApi = {
+  bookmarks: {
+    ...bookmarkEvents,
+    getTree(callback) {
+      failedTreeRequestCount++;
+      callback(failedTreeRequestCount === 1 ? undefined : [{ id: '0', children: [] }]);
+    }
+  },
+  runtime: { lastError: { message: 'temporary read failure' } }
+};
+const failedTreeCache = bookmarkService.createTreeCache(failedTreeChromeApi);
+let firstTreeError = null;
+failedTreeCache.getTreeCached((tree, error) => {
+  assert.equal(tree, null);
+  firstTreeError = error;
+});
+await new Promise((resolve) => setImmediate(resolve));
+assert.match(firstTreeError?.message || '', /temporary read failure/);
+failedTreeChromeApi.runtime.lastError = null;
+let recoveredTree = null;
+failedTreeCache.getTreeCached((tree, error) => {
+  assert.equal(error, null);
+  recoveredTree = tree;
+});
+await new Promise((resolve) => setImmediate(resolve));
+assert.equal(failedTreeRequestCount, 2, 'failed bookmark-tree reads must not be cached');
+assert.equal(JSON.stringify(recoveredTree), JSON.stringify([{ id: '0', children: [] }]));
+
 const sampleTree = [{
   id: '0',
   children: [
@@ -195,6 +252,132 @@ const sampleTree = [{
     }
   ]
 }];
+
+const navigationTree = [{
+  id: '0',
+  children: [
+    {
+      id: '1',
+      title: 'Bookmarks Bar',
+      children: [
+        { id: 'same-1', title: 'Same', children: [] },
+        { id: 'same-2', title: 'Same', children: [] }
+      ]
+    },
+    {
+      id: '2',
+      title: 'Other Bookmarks',
+      children: [
+        {
+          id: 'parent',
+          title: 'Parent',
+          children: [{ id: 'nested', title: 'Nested', children: [] }]
+        }
+      ]
+    }
+  ]
+}];
+assert.equal(
+  JSON.stringify(bookmarkService.findBookmarkNodePath(navigationTree, 'nested').map((node) => node.id)),
+  JSON.stringify(['2', 'parent', 'nested']),
+  'folder navigation must preserve the real ancestry'
+);
+const folderPinKeys = bookmarkService.buildFolderPinKeyMap(navigationTree);
+assert.equal(folderPinKeys.get('nested'), 'folder-id:nested');
+assert.notEqual(folderPinKeys.get('same-1'), folderPinKeys.get('same-2'), 'same-named sibling folders need distinct pin keys');
+const reorderedNavigationTree = JSON.parse(JSON.stringify(navigationTree));
+reorderedNavigationTree[0].children[0].children.reverse();
+const reorderedFolderPinKeys = bookmarkService.buildFolderPinKeyMap(reorderedNavigationTree);
+assert.equal(folderPinKeys.get('same-1'), reorderedFolderPinKeys.get('same-1'), 'same-named folder keys must survive sibling reordering');
+assert.equal(folderPinKeys.get('same-2'), reorderedFolderPinKeys.get('same-2'), 'same-named folder keys must survive sibling reordering');
+
+const collisionTree = [{
+  id: '0',
+  children: [{
+    id: 'bar',
+    title: 'Bar',
+    children: [
+      { id: 'same-a', title: 'Same', children: [{ id: 'same-a-child', title: 'Child', children: [] }] },
+      { id: 'same-b', title: 'Same', children: [{ id: 'same-b-child', title: 'Child', children: [] }] },
+      { id: 'empty-a', title: '', children: [] },
+      { id: 'empty-b', title: '', children: [] },
+      { id: 'literal-suffix', title: 'Same#1', children: [] },
+      { id: 'slash-title', title: 'A/B', children: [] },
+      { id: 'nested-a', title: 'A', children: [{ id: 'nested-b', title: 'B', children: [] }] }
+    ]
+  }]
+}];
+const collisionMetadata = bookmarkService.buildFolderPinMetadata(collisionTree);
+const collisionKeys = Array.from(collisionMetadata.idToPinKey.values());
+assert.equal(new Set(collisionKeys).size, collisionKeys.length, 'folder keys must not collide with user titles or nested paths');
+assert.notEqual(collisionMetadata.idToPinKey.get('same-a-child'), collisionMetadata.idToPinKey.get('same-b-child'), 'ambiguous ancestry must keep descendant keys distinct');
+assert.equal(
+  JSON.stringify(collisionMetadata.legacyAliases.get('folder:bar/same')),
+  JSON.stringify([
+    collisionMetadata.idToPinKey.get('same-a'),
+    collisionMetadata.idToPinKey.get('same-b')
+  ]),
+  'legacy duplicate-folder keys must preserve every folder they previously represented'
+);
+assert.equal(
+  JSON.stringify(bookmarkService.migrateStoredPinList(
+    ['folder:bar/same'],
+    collisionMetadata.idToPinKey,
+    collisionMetadata.legacyAliases
+  )),
+  JSON.stringify({ value: [
+    collisionMetadata.idToPinKey.get('same-a'),
+    collisionMetadata.idToPinKey.get('same-b')
+  ], changed: true }),
+  'legacy duplicate-folder pins must survive the 1.6 migration'
+);
+
+const uniqueFolderTree = [{
+  id: '0',
+  children: [{
+    id: 'bar',
+    title: 'Bar',
+    children: [{ id: 'same-a', title: 'Same', children: [{ id: 'same-a-child', title: 'Child', children: [] }] }]
+  }]
+}];
+const ambiguousFolderTree = JSON.parse(JSON.stringify(uniqueFolderTree));
+ambiguousFolderTree[0].children[0].children.push({ id: 'same-b', title: 'Same', children: [] });
+const uniqueMetadata = bookmarkService.buildFolderPinMetadata(uniqueFolderTree);
+const ambiguousMetadata = bookmarkService.buildFolderPinMetadata(ambiguousFolderTree);
+const uniquePins = [
+  uniqueMetadata.idToPinKey.get('same-a'),
+  uniqueMetadata.idToPinKey.get('same-a-child')
+];
+const ambiguousPins = [
+  ambiguousMetadata.idToPinKey.get('same-a'),
+  ambiguousMetadata.idToPinKey.get('same-a-child')
+];
+assert.equal(
+  JSON.stringify(bookmarkService.migrateStoredPinList(
+    uniquePins,
+    ambiguousMetadata.idToPinKey,
+    ambiguousMetadata.legacyAliases
+  ).value),
+  JSON.stringify(ambiguousPins),
+  'pins must survive when a unique folder path becomes ambiguous'
+);
+assert.equal(
+  JSON.stringify(bookmarkService.migrateStoredPinList(
+    ambiguousPins,
+    uniqueMetadata.idToPinKey,
+    uniqueMetadata.legacyAliases
+  ).value),
+  JSON.stringify(uniquePins),
+  'pins must survive when an ambiguous folder path becomes unique again'
+);
+const renamedSiblingTree = JSON.parse(JSON.stringify(uniqueFolderTree));
+renamedSiblingTree[0].children[0].children.unshift({ id: 'same-b', title: 'Other', children: [] });
+const beforeRenameKeys = bookmarkService.buildFolderPinKeyMap(renamedSiblingTree);
+renamedSiblingTree[0].children[0].children[0].title = 'Same';
+const afterRenameKeys = bookmarkService.buildFolderPinKeyMap(renamedSiblingTree);
+assert.equal(beforeRenameKeys.get('same-a'), afterRenameKeys.get('same-a'), 'renaming an earlier sibling must not steal an existing folder pin');
+assert.equal(bookmarkService.canReorderBookmarkList({ isSearchResult: false, isUncategorized: false }), true);
+assert.equal(bookmarkService.canReorderBookmarkList({ isSearchResult: false, isUncategorized: true }), false);
 
 const duplicateGroups = tools.collectDuplicateUrlGroups(sampleTree);
 assert.equal(duplicateGroups.length, 1);
